@@ -24,8 +24,10 @@ use embassy_futures::select::select;
 use embassy_time::{Duration, Timer};
 
 use esp_backtrace as _;
+use esp_bootloader_esp_idf::partitions;
 use esp_hal::timer::timg::TimerGroup;
 
+use esp_storage::FlashStorage;
 use log::info;
 
 use rs_matter_embassy::epoch::epoch;
@@ -38,15 +40,73 @@ use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
 use rs_matter_embassy::matter::utils::select::Coalesce;
 use rs_matter_embassy::matter::{clusters, devices};
 use rs_matter_embassy::rand::esp::{esp_init_rand, esp_rand};
-use rs_matter_embassy::stack::persist::DummyKvBlobStore;
+use rs_matter_embassy::stack::persist::{DummyKvBlobStore, KvBlobStore};
 use rs_matter_embassy::wireless::esp::EspWifiDriver;
 use rs_matter_embassy::wireless::{EmbassyWifi, EmbassyWifiMatterStack};
+
+use embedded_storage::{ReadStorage, Storage};
 
 extern crate alloc;
 
 const BUMP_SIZE: usize = 15500;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+struct MyStorage {
+    flash: FlashStorage,
+}
+
+impl KvBlobStore for MyStorage {
+    async fn load<F>(
+        &mut self,
+        key: u16,
+        buf: &mut [u8],
+        cb: F,
+    ) -> Result<(), rs_matter_embassy::matter::error::Error>
+    where
+        F: FnOnce(Option<&[u8]>) -> Result<(), rs_matter_embassy::matter::error::Error>,
+    {
+        info!("Load: {key} {buf:?}");
+        if let Err(e) = self.flash.read(key as u32, buf) {
+            panic!("{e:?}")
+        }
+
+        if let Err(e) = cb(Some(buf)) {
+            log::error!("{e:?}")
+        }
+
+        Ok(())
+    }
+
+    async fn store<F>(
+        &mut self,
+        key: u16,
+        buf: &mut [u8],
+        cb: F,
+    ) -> Result<(), rs_matter_embassy::matter::error::Error>
+    where
+        F: FnOnce(&mut [u8]) -> Result<usize, rs_matter_embassy::matter::error::Error>,
+    {
+        info!("Store: {key} {buf:?}");
+        if let Err(e) = self.flash.write(key as u32, buf) {
+            panic!("{e:?}")
+        }
+
+        if let Err(e) = cb(buf) {
+            log::error!("{e:?}")
+        }
+
+        Ok(())
+    }
+
+    async fn remove(
+        &mut self,
+        key: u16,
+        buf: &mut [u8],
+    ) -> Result<(), rs_matter_embassy::matter::error::Error> {
+        todo!()
+    }
+}
 
 #[esp_hal_embassy::main]
 async fn main(_s: Spawner) {
@@ -64,8 +124,52 @@ async fn main(_s: Spawner) {
 
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    // let mut flash = FlashStorage::new(peripherals.FLASH);
-    // info!("Flash size = {}", flash.capacity());
+    let mut flash = FlashStorage::new();
+    info!("Flash size = {}", flash.capacity());
+    let mut pt_mem = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
+    let pt = partitions::read_partition_table(&mut flash, &mut pt_mem).unwrap();
+
+    for i in 0..pt.len() {
+        let raw = pt.get_partition(i).unwrap();
+        info!("{:?}", raw);
+    }
+
+    // The app descriptor (if present) is contained in the first 256 bytes
+    // of an app image, right after the image header (24 bytes) and the first
+    // section header (8 bytes)
+    let mut app_desc = [0u8; 256];
+    pt.find_partition(partitions::PartitionType::App(
+        partitions::AppPartitionSubType::Factory,
+    ))
+    .unwrap()
+    .unwrap()
+    .as_embedded_storage(&mut flash)
+    .read(32, &mut app_desc)
+    .unwrap();
+    info!("App descriptor dump {:02x?}\n", app_desc);
+
+    let nvs = pt
+        .find_partition(partitions::PartitionType::Data(
+            partitions::DataPartitionSubType::Nvs,
+        ))
+        .unwrap()
+        .unwrap();
+    let mut nvs_partition = nvs.as_embedded_storage(&mut flash);
+
+    let mut bytes = [0u8; 32];
+    info!("NVS partition size = {}\n", nvs_partition.capacity());
+
+    let offset_in_nvs_partition = 0;
+
+    nvs_partition
+        .read(offset_in_nvs_partition, &mut bytes)
+        .unwrap();
+    info!(
+        "Read from {:x}:  {:02x?}\n",
+        offset_in_nvs_partition,
+        &bytes[..32]
+    );
+    let my_storage = MyStorage { flash };
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let rng = esp_hal::rng::Rng::new(peripherals.RNG);
@@ -119,7 +223,7 @@ async fn main(_s: Spawner) {
     // not being very intelligent w.r.t. stack usage in async functions
     //
     // This step can be repeated in that the stack can be stopped and started multiple times, as needed.
-    let store = stack.create_shared_store(DummyKvBlobStore);
+    let store = stack.create_shared_store(my_storage);
     let mut matter = pin!(stack.run_coex(
         // The Matter stack needs to instantiate an `embassy-net` `Driver` and `Controller`
         EmbassyWifi::new(

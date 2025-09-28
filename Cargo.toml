@@ -1,15 +1,23 @@
 [package]
 edition      = "2021"
-name         = "matter-test"
+name         = "esp-homekit"
 rust-version = "1.86"
 version      = "0.1.0"
 
 [[bin]]
-name = "matter-test"
+name = "esp-homekit"
 path = "./src/bin/main.rs"
 
+[workspace]
+members = [
+  "crates/rs-matter/rs-matter",
+  "crates/rs-matter/rs-matter-macros",
+  "crates/rs-matter-stack",
+  "crates/rs-matter-embassy"
+]
+
 [dependencies]
-rs-matter-embassy = { path = "../rs-matter-embassy/rs-matter-embassy/", features = ["esp", "log", "embassy-net"] }
+rs-matter-embassy = { path = "./crates/rs-matter-embassy/", features = ["esp", "log", "embassy-net"] }
 esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32c6"] }
 esp-hal = { version = "=1.0.0-rc.0", features = [
   "esp32c6",
@@ -70,7 +78,8 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 static_cell = "2.1.1"
 trouble-host = { version = "0.1.0", features = ["gatt"] }
 embassy-futures = "0.1.2"
-
+embedded-storage = "0.3.1"
+esp-storage = {version = "0.7.0", features = ["esp32c6"]}
 
 [profile.dev]
 # Rust debug is too slow.
@@ -85,3 +94,25 @@ incremental      = false
 lto              = 'fat'
 opt-level        = 's'
 overflow-checks  = false
+
+[profile.dev.package.rs-matter]
+debug = true
+opt-level = "z"
+
+[profile.release.package.rs-matter]
+opt-level = "z"
+
+[profile.release.package.rs-matter-stack]
+opt-level = "s"
+
+[profile.dev.package.rs-matter-stack]
+debug = true
+opt-level = "z"
+
+[profile.release.package.rs-matter-embassy]
+opt-level = "s"
+
+[profile.dev.package.rs-matter-embassy]
+debug = true
+opt-level = "z"
+

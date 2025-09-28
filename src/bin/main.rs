@@ -40,7 +40,7 @@ use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
 use rs_matter_embassy::matter::utils::select::Coalesce;
 use rs_matter_embassy::matter::{clusters, devices};
 use rs_matter_embassy::rand::esp::{esp_init_rand, esp_rand};
-use rs_matter_embassy::stack::persist::{DummyKvBlobStore, KvBlobStore};
+use rs_matter_embassy::stack::persist::KvBlobStore;
 use rs_matter_embassy::wireless::esp::EspWifiDriver;
 use rs_matter_embassy::wireless::{EmbassyWifi, EmbassyWifiMatterStack};
 
@@ -101,8 +101,8 @@ impl KvBlobStore for MyStorage {
 
     async fn remove(
         &mut self,
-        key: u16,
-        buf: &mut [u8],
+        _key: u16,
+        _buf: &mut [u8],
     ) -> Result<(), rs_matter_embassy::matter::error::Error> {
         todo!()
     }

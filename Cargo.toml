@@ -1,12 +1,20 @@
 [package]
-edition      = "2021"
-name         = "esp-homekit"
+edition = "2021"
+name = "esp-homekit"
 rust-version = "1.86"
-version      = "0.1.0"
+version = "0.1.0"
+
+[lib]
+test = false
+doctest = false
+bench = false
 
 [[bin]]
 name = "esp-homekit"
 path = "./src/bin/main.rs"
+test = false
+doctest = false
+bench = false
 
 [dependencies]
 esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32c6"] }
@@ -69,10 +77,14 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 static_cell = "2.1.1"
 trouble-host = { version = "0.1.0", features = ["gatt"] }
 
-rs-matter-embassy = { git = "https://github.com/H1ghBre4k3r/rs-matter-embassy.git", rev = "3b72347204c460f861d0e6b6a2bf16cf23ea14a1", features = ["esp", "log", "embassy-net"] }
+rs-matter-embassy = { git = "https://github.com/H1ghBre4k3r/rs-matter-embassy.git", rev = "3b72347204c460f861d0e6b6a2bf16cf23ea14a1", features = [
+  "esp",
+  "log",
+  "embassy-net",
+] }
 embassy-futures = "0.1.2"
 embedded-storage = "0.3.1"
-esp-storage = {version = "0.7.0", features = ["esp32c6"]}
+esp-storage = { version = "0.7.0", features = ["esp32c6"] }
 
 [profile.dev]
 # Rust debug is too slow.
@@ -80,13 +92,13 @@ esp-storage = {version = "0.7.0", features = ["esp32c6"]}
 opt-level = "s"
 
 [profile.release]
-codegen-units    = 1     # LLVM can perform better optimizations using a single thread
-debug            = 2
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
 debug-assertions = false
-incremental      = false
-lto              = 'fat'
-opt-level        = 's'
-overflow-checks  = false
+incremental = false
+lto = 'fat'
+opt-level = 's'
+overflow-checks = false
 #
 # [profile.dev.package.rs-matter]
 # debug = true

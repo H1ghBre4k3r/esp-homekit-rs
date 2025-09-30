@@ -85,6 +85,7 @@ rs-matter-embassy = { git = "https://github.com/H1ghBre4k3r/rs-matter-embassy.gi
 embassy-futures = "0.1.2"
 embedded-storage = "0.3.1"
 esp-storage = { version = "0.7.0", features = ["esp32c6"] }
+embassy-embedded-hal = "0.5.0"
 
 [profile.dev]
 # Rust debug is too slow.
@@ -99,6 +100,7 @@ incremental = false
 lto = 'fat'
 opt-level = 's'
 overflow-checks = false
+#strip = true             # Automatically strip symbols from the binary.
 #
 # [profile.dev.package.rs-matter]
 # debug = true

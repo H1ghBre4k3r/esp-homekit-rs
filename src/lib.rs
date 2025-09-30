@@ -1,6 +1,8 @@
 #![no_std]
 
-use crate::color_control::StepColorTemperatureRequest;
+use rs_matter::{dm::Dataver, utils::maybe::Maybe, with};
+
+use crate::color_control::{ColorMode, CommandId, Feature};
 
 pub mod color_control;
 pub mod nvs;
@@ -15,49 +17,65 @@ macro_rules! mk_static {
     }};
 }
 
-struct MyController;
+pub struct MyController {
+    dataver: Dataver,
+}
+
+impl MyController {
+    pub fn new(dataver: Dataver) -> Self {
+        MyController { dataver }
+    }
+}
 
 impl color_control::ClusterHandler for MyController {
-    const CLUSTER: rs_matter::dm::Cluster<'static> = color_control::FULL_CLUSTER;
+    const CLUSTER: rs_matter::dm::Cluster<'static> = color_control::FULL_CLUSTER
+        .with_attrs(with!(required))
+        .with_cmds(with!(
+            CommandId::MoveColorTemperature
+                | CommandId::MoveToColorTemperature
+                | CommandId::MoveColor
+                | CommandId::MoveToColor
+        ))
+        .with_features(Feature::all().bits());
 
     fn dataver(&self) -> u32 {
-        todo!()
+        self.dataver.get()
     }
 
     fn dataver_changed(&self) {
-        todo!()
+        self.dataver.changed();
     }
 
     fn color_mode(
         &self,
         ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u8, rs_matter::error::Error> {
-        todo!()
+        Ok(ColorMode::CurrentXAndCurrentY as _)
     }
 
     fn options(&self, ctx: impl rs_matter::dm::ReadContext) -> Result<u8, rs_matter::error::Error> {
-        todo!()
+        Ok(1)
     }
 
     fn number_of_primaries(
         &self,
         ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<rs_matter::tlv::Nullable<u8>, rs_matter::error::Error> {
-        todo!()
+        Ok(Maybe::some(1))
     }
 
     fn enhanced_color_mode(
         &self,
         ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u8, rs_matter::error::Error> {
-        todo!()
+        Ok(ColorMode::CurrentXAndCurrentY as _)
     }
 
     fn color_capabilities(
         &self,
         ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u16, rs_matter::error::Error> {
-        todo!()
+        Ok(color_control::ColorCapabilities::all().bits())
     }
 
     fn set_options(

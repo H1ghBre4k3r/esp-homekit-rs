@@ -24,16 +24,16 @@ use esp_alloc::heap_allocator;
 use esp_backtrace as _;
 use esp_hal::timer::timg::TimerGroup;
 
-use esp_homekit::mk_static;
+use esp_homekit::color_control::ClusterHandler;
 use esp_homekit::nvs::Nvs;
+use esp_homekit::{color_control, mk_static, MyController};
 use log::info;
 
+use rs_matter::dm::DeviceType;
 use rs_matter_embassy::epoch::epoch;
 use rs_matter_embassy::matter::dm::clusters::desc::{self, ClusterHandler as _};
-use rs_matter_embassy::matter::dm::clusters::on_off::ClusterHandler;
 use rs_matter_embassy::matter::dm::clusters::on_off::{self};
 use rs_matter_embassy::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
-use rs_matter_embassy::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
 use rs_matter_embassy::matter::dm::{Async, Dataver, EmptyHandler, Endpoint, EpClMatcher, Node};
 use rs_matter_embassy::matter::utils::select::Coalesce;
 use rs_matter_embassy::matter::{clusters, devices};
@@ -90,6 +90,10 @@ async fn main(_s: Spawner) {
         )
     );
 
+    let foo = MyController::new(Dataver::new_rand(stack.matter().rand()));
+
+    let handler = color_control::HandlerAdaptor(&foo);
+
     // == Step 3: ==
     // Our "light" on-off cluster.
     // Can be anything implementing `rs_matter::data_model::AsyncHandler`
@@ -98,12 +102,16 @@ async fn main(_s: Spawner) {
     // Chain our endpoint clusters
     let handler = EmptyHandler
         // Our on-off cluster, on Endpoint 1
+        // .chain(
+        //     EpClMatcher::new(
+        //         Some(LIGHT_ENDPOINT_ID),
+        //         Some(on_off::OnOffHandler::CLUSTER.id),
+        //     ),
+        //     Async(on_off::HandlerAdaptor(&on_off)),
+        // )
         .chain(
-            EpClMatcher::new(
-                Some(LIGHT_ENDPOINT_ID),
-                Some(on_off::OnOffHandler::CLUSTER.id),
-            ),
-            Async(on_off::HandlerAdaptor(&on_off)),
+            EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(MyController::CLUSTER.id)),
+            Async(handler),
         )
         // Each Endpoint needs a Descriptor cluster too
         // Just use the one that `rs-matter` provides out of the box
@@ -169,8 +177,11 @@ const NODE: Node = Node {
         EmbassyWifiMatterStack::<0, ()>::root_endpoint(),
         Endpoint {
             id: LIGHT_ENDPOINT_ID,
-            device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
-            clusters: clusters!(desc::DescHandler::CLUSTER, on_off::OnOffHandler::CLUSTER),
+            device_types: devices!(DeviceType {
+                dtype: 0x010C,
+                drev: 4
+            }),
+            clusters: clusters!(desc::DescHandler::CLUSTER, MyController::CLUSTER),
         },
     ],
 };

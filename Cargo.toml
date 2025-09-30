@@ -86,6 +86,7 @@ embassy-futures = "0.1.2"
 embedded-storage = "0.3.1"
 esp-storage = { version = "0.7.0", features = ["esp32c6"] }
 embassy-embedded-hal = "0.5.0"
+rs-matter = { git = "https://github.com/H1ghBre4k3r/rs-matter.git", rev = "3faa3b40a9412847f13a702dfac696a387257728", default-features = false }
 
 [profile.dev]
 # Rust debug is too slow.

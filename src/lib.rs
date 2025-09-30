@@ -4,7 +4,10 @@ use esp_hal::rmt::{ConstChannelAccess, Tx};
 use esp_hal_smartled::SmartLedsAdapter;
 use log::info;
 use rs_matter::{
-    dm::Dataver,
+    dm::{
+        clusters::on_off::{self, ClusterHandler as _},
+        Dataver,
+    },
     utils::{cell::RefCell, maybe::Maybe},
     with,
 };
@@ -30,14 +33,74 @@ type Led = SmartLedsAdapter<ConstChannelAccess<Tx, 0>, 25>;
 pub struct LightController {
     dataver: Dataver,
     led: RefCell<Led>,
+    on_off: RefCell<bool>,
+    hue: RefCell<u8>,
+    saturation: RefCell<u8>,
 }
 
 impl LightController {
+    pub const ON_OFF_CLUSTER: rs_matter::dm::Cluster<'static> = on_off::OnOffHandler::CLUSTER;
+    pub const COLOR_CONTROL_CLUSTER: rs_matter::dm::Cluster<'static> = color_control::FULL_CLUSTER
+        .with_attrs(with!(required))
+        .with_cmds(with!(
+            CommandId::MoveToHue
+                | CommandId::MoveHue
+                | CommandId::StepHue
+                | CommandId::MoveToSaturation
+                | CommandId::MoveSaturation
+                | CommandId::StepSaturation
+                | CommandId::MoveToHueAndSaturation
+                | CommandId::MoveToColor
+                | CommandId::MoveColor
+                | CommandId::StepColor
+                | CommandId::MoveToColorTemperature
+                | CommandId::EnhancedMoveToHue
+                | CommandId::EnhancedMoveHue
+                | CommandId::EnhancedStepHue
+                | CommandId::EnhancedMoveToHueAndSaturation
+                | CommandId::ColorLoopSet
+                | CommandId::StopMoveStep
+                | CommandId::MoveColorTemperature
+                | CommandId::StepColorTemperature
+        ))
+        .with_features(Feature::all().bits());
+
     pub fn new(dataver: Dataver, led: Led) -> Self {
         LightController {
             dataver,
             led: RefCell::new(led),
+            on_off: RefCell::new(false),
+            hue: RefCell::new(0),
+            saturation: RefCell::new(0),
         }
+    }
+
+    fn update_led(&self) {
+        let on = *self.on_off.borrow();
+        let mut led = self.led.borrow_mut();
+
+        if on {
+            let hue = *self.hue.borrow();
+            let sat = *self.saturation.borrow();
+            let RGB8 { r, g, b } = hsv_to_rgb(hue, sat, 100);
+            // Note: LED has swapped R and G channels
+            led.write([RGB8 { r: g, g: r, b }]).unwrap();
+        } else {
+            led.write([RGB8 { r: 0, g: 0, b: 0 }]).unwrap();
+        }
+    }
+
+    pub fn get_on_off(&self) -> bool {
+        *self.on_off.borrow()
+    }
+
+    pub fn set_on_off(&self, value: bool) {
+        *self.on_off.borrow_mut() = value;
+        self.update_led();
+    }
+
+    fn notify_dataver_changed(&self) {
+        self.dataver.changed();
     }
 }
 
@@ -75,37 +138,14 @@ fn hsv_to_rgb(h: u8, s: u8, v: u8) -> RGB8 {
 }
 
 impl color_control::ClusterHandler for LightController {
-    const CLUSTER: rs_matter::dm::Cluster<'static> = color_control::FULL_CLUSTER
-        .with_attrs(with!(required))
-        .with_cmds(with!(
-            CommandId::MoveToHue
-                | CommandId::MoveHue
-                | CommandId::StepHue
-                | CommandId::MoveToSaturation
-                | CommandId::MoveSaturation
-                | CommandId::StepSaturation
-                | CommandId::MoveToHueAndSaturation
-                | CommandId::MoveToColor
-                | CommandId::MoveColor
-                | CommandId::StepColor
-                | CommandId::MoveToColorTemperature
-                | CommandId::EnhancedMoveToHue
-                | CommandId::EnhancedMoveHue
-                | CommandId::EnhancedStepHue
-                | CommandId::EnhancedMoveToHueAndSaturation
-                | CommandId::ColorLoopSet
-                | CommandId::StopMoveStep
-                | CommandId::MoveColorTemperature
-                | CommandId::StepColorTemperature
-        ))
-        .with_features(Feature::all().bits());
+    const CLUSTER: rs_matter::dm::Cluster<'static> = Self::COLOR_CONTROL_CLUSTER;
 
     fn dataver(&self) -> u32 {
         self.dataver.get()
     }
 
     fn dataver_changed(&self) {
-        self.dataver.changed();
+        self.notify_dataver_changed();
     }
 
     fn color_mode(
@@ -216,9 +256,11 @@ impl color_control::ClusterHandler for LightController {
         let Ok(saturation) = request.saturation() else {
             panic!("missing saturation")
         };
-        let RGB8 { r, g, b } = hsv_to_rgb(hue, saturation, 100);
-        let mut led = self.led.borrow_mut();
-        led.write([RGB8 { r: g, g: r, b }]).unwrap();
+
+        *self.hue.borrow_mut() = hue;
+        *self.saturation.borrow_mut() = saturation;
+        self.update_led();
+        self.notify_dataver_changed();
         Ok(())
     }
 
@@ -328,5 +370,84 @@ impl color_control::ClusterHandler for LightController {
     ) -> Result<(), rs_matter::error::Error> {
         info!("step temp {request:?}");
         todo!()
+    }
+}
+
+impl on_off::ClusterHandler for LightController {
+    const CLUSTER: rs_matter::dm::Cluster<'static> = Self::ON_OFF_CLUSTER;
+
+    fn dataver(&self) -> u32 {
+        self.dataver.get()
+    }
+
+    fn dataver_changed(&self) {
+        self.notify_dataver_changed();
+    }
+
+    fn on_off(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<bool, rs_matter::error::Error> {
+        Ok(self.get_on_off())
+    }
+
+    fn handle_on(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("on");
+        self.set_on_off(true);
+        self.notify_dataver_changed();
+        Ok(())
+    }
+
+    fn handle_off(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("off");
+        self.set_on_off(false);
+        self.notify_dataver_changed();
+        Ok(())
+    }
+
+    fn handle_toggle(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("toggle");
+        let current = self.get_on_off();
+        self.set_on_off(!current);
+        self.notify_dataver_changed();
+        Ok(())
+    }
+
+    fn handle_off_with_effect(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: on_off::OffWithEffectRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("off with effect");
+        // For simplicity, treat same as regular off
+        self.handle_off(_ctx)
+    }
+
+    fn handle_on_with_recall_global_scene(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("on with recall global scene");
+        // For simplicity, treat same as regular on
+        self.handle_on(_ctx)
+    }
+
+    fn handle_on_with_timed_off(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: on_off::OnWithTimedOffRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("on with timed off");
+        // For simplicity, treat same as regular on
+        self.handle_on(_ctx)
     }
 }

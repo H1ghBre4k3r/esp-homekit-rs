@@ -27,7 +27,6 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 
 use esp_hal_smartled::{smart_led_buffer, SmartLedsAdapter};
-use esp_homekit::color_control::{ClusterAsyncHandler, ClusterHandler};
 use esp_homekit::nvs::Nvs;
 use esp_homekit::{color_control, mk_static, LightController};
 use log::info;
@@ -35,7 +34,7 @@ use log::info;
 use rs_matter::dm::DeviceType;
 use rs_matter_embassy::epoch::epoch;
 use rs_matter_embassy::matter::dm::clusters::desc::{self, ClusterHandler as _};
-use rs_matter_embassy::matter::dm::clusters::on_off::{self, ClusterHandler as _};
+use rs_matter_embassy::matter::dm::clusters::on_off::{self};
 use rs_matter_embassy::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter_embassy::matter::dm::{Async, Dataver, EmptyHandler, Endpoint, EpClMatcher, Node};
 use rs_matter_embassy::matter::utils::select::Coalesce;
@@ -98,11 +97,10 @@ async fn main(_s: Spawner) {
 
     let light_controller = LightController::new(Dataver::new_rand(stack.matter().rand()), led);
     let light_control_handler = color_control::HandlerAdaptor(&light_controller);
+    let on_off_handler = on_off::HandlerAdaptor(&light_controller);
 
     // == Step 3: ==
-    // Our "light" on-off cluster.
-    // Can be anything implementing `rs_matter::data_model::AsyncHandler`
-    let on_off = on_off::OnOffHandler::new(Dataver::new_rand(stack.matter().rand()));
+    // Our "light" on-off and color control clusters, both handled by LightController
 
     // Chain our endpoint clusters
     let handler = EmptyHandler
@@ -110,13 +108,16 @@ async fn main(_s: Spawner) {
         .chain(
             EpClMatcher::new(
                 Some(LIGHT_ENDPOINT_ID),
-                Some(on_off::OnOffHandler::CLUSTER.id),
+                Some(LightController::ON_OFF_CLUSTER.id),
             ),
-            Async(on_off::HandlerAdaptor(&on_off)),
+            Async(on_off_handler),
         )
         // Color control cluster
         .chain(
-            EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(LightController::CLUSTER.id)),
+            EpClMatcher::new(
+                Some(LIGHT_ENDPOINT_ID),
+                Some(LightController::COLOR_CONTROL_CLUSTER.id),
+            ),
             Async(light_control_handler),
         )
         // Each Endpoint needs a Descriptor cluster too
@@ -158,7 +159,8 @@ async fn main(_s: Spawner) {
             Timer::after(Duration::from_secs(5)).await;
 
             // Toggle
-            on_off.set(!on_off.get());
+            let current = light_controller.get_on_off();
+            light_controller.set_on_off(!current);
 
             // Let the Matter stack know that we have changed
             // the state of our Light device
@@ -189,8 +191,8 @@ const NODE: Node = Node {
             }),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
-                on_off::OnOffHandler::CLUSTER,
-                LightController::CLUSTER
+                LightController::ON_OFF_CLUSTER,
+                LightController::COLOR_CONTROL_CLUSTER
             ),
         },
     ],

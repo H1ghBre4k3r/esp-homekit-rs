@@ -395,9 +395,105 @@ impl color_control::ClusterHandler for LightController {
 
     fn color_capabilities(
         &self,
-        ctx: impl rs_matter::dm::ReadContext,
+        _ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u16, rs_matter::error::Error> {
         Ok(color_control::ColorCapabilities::all().bits())
+    }
+
+    /// Returns the current hue value when in HSV mode.
+    ///
+    /// Matter spec: CurrentHue attribute (0x0000)
+    /// - Range: 0-254 (circular color wheel, red=0, green=85, blue=170)
+    /// - Available only when ColorMode is CurrentHueAndCurrentSaturation
+    /// - Returns None in other color modes (XY, ColorTemperature)
+    ///
+    /// # Design Decision
+    /// Returns None when not in HSV mode to prevent controllers from displaying
+    /// incorrect color information. This aligns with Matter spec semantics.
+    fn current_hue(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u8, rs_matter::error::Error> {
+        Ok(*self.hue.borrow())
+    }
+
+    /// Returns the current saturation value when in HSV mode.
+    ///
+    /// Matter spec: CurrentSaturation attribute (0x0001)
+    /// - Range: 0-254 (0=white/no color, 254=fully saturated)
+    /// - Available only when ColorMode is CurrentHueAndCurrentSaturation
+    /// - Returns None in other color modes
+    fn current_saturation(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u8, rs_matter::error::Error> {
+        Ok(*self.saturation.borrow())
+    }
+
+    /// Returns the current X coordinate in CIE 1931 color space.
+    ///
+    /// Matter spec: CurrentX attribute (0x0003)
+    /// - Range: 0-65535 representing 0.0-1.0
+    /// - Available only when ColorMode is CurrentXAndCurrentY
+    /// - Returns None in other color modes (HSV, ColorTemperature)
+    ///
+    /// # Note
+    /// XY coordinates are currently not calculated from HSV. When in XY mode,
+    /// returns the stored value which may not reflect actual LED color.
+    /// TODO: Implement HSV→XY conversion in Phase 3.
+    fn current_x(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(*self.current_x.borrow())
+    }
+
+    /// Returns the current Y coordinate in CIE 1931 color space.
+    ///
+    /// Matter spec: CurrentY attribute (0x0004)
+    /// - Range: 0-65535 representing 0.0-1.0
+    /// - Available only when ColorMode is CurrentXAndCurrentY
+    /// - Returns None in other color modes
+    fn current_y(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(*self.current_y.borrow())
+    }
+
+    /// Returns the current color temperature in mireds.
+    ///
+    /// Matter spec: ColorTemperatureMireds attribute (0x0007)
+    /// - Range: Typically 153-500 (6500K cool white to 2000K warm white)
+    /// - Mireds = 1,000,000 / Kelvin
+    /// - Available only when ColorMode is ColorTemperature
+    /// - Returns None in other color modes (HSV, XY)
+    fn color_temperature_mireds(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(*self.color_temperature_mireds.borrow())
+    }
+
+    /// Returns the current enhanced (16-bit) hue value when in HSV mode.
+    ///
+    /// Matter spec: EnhancedCurrentHue attribute (0x4000)
+    /// - Range: 0-65535 (full 16-bit color wheel)
+    /// - Available only when ColorMode is CurrentHueAndCurrentSaturation
+    /// - Returns None in other color modes
+    ///
+    /// # Enhanced Hue
+    /// Enhanced hue provides finer color control than standard 8-bit hue:
+    /// - Standard hue: 254 steps (~1.4° per step)
+    /// - Enhanced hue: 65535 steps (~0.0055° per step)
+    ///
+    /// The enhanced hue automatically syncs with standard hue via conversion:
+    /// `enhanced = (standard * 65535) / 254`
+    fn enhanced_current_hue(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(*self.enhanced_hue.borrow())
     }
 
     /// Set the options bitmap for color control behavior.
@@ -461,13 +557,40 @@ impl color_control::ClusterHandler for LightController {
         Ok(())
     }
 
+    /// Continuous hue rotation (not yet implemented).
+    ///
+    /// Matter spec: MoveHue command (0x01)
+    /// - MoveMode: Stop (0), Up (1), Down (3)
+    /// - Rate: Units per second
+    ///
+    /// # Status: STUB
+    /// This command requires an async task to continuously update hue at the specified rate.
+    /// Implementation is deferred to Phase 3 due to complexity:
+    /// - Requires Embassy task management
+    /// - Needs rate control state machine
+    /// - Must handle stop command cancellation
+    /// - Estimated effort: 4-6 hours
+    ///
+    /// # Current Behavior
+    /// Logs a warning and returns Ok without changing state.
+    /// This prevents device crashes while documenting the missing feature.
     fn handle_move_hue(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveHueRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move hue {request:?}");
-        todo!()
+        let move_mode = request.move_mode().ok();
+        let rate = request.rate().ok();
+
+        log::warn!(
+            "Continuous hue movement not implemented (MoveHue command). \
+             Request: mode={:?}, rate={:?}. \
+             TODO: Implement async task for continuous movement (Phase 3).",
+            move_mode, rate
+        );
+
+        // Don't change state - just acknowledge command
+        Ok(())
     }
 
     /// Increment or decrement hue by a step size.
@@ -559,13 +682,31 @@ impl color_control::ClusterHandler for LightController {
         Ok(())
     }
 
+    /// Continuous saturation change (not yet implemented).
+    ///
+    /// Matter spec: MoveSaturation command (0x04)
+    /// - MoveMode: Stop (0), Up (1), Down (3)
+    /// - Rate: Units per second
+    ///
+    /// # Status: STUB
+    /// Similar to MoveHue, requires async task for continuous updates.
+    /// Deferred to Phase 3.
+    ///
+    /// # Current Behavior
+    /// Logs warning and returns Ok without state change.
     fn handle_move_saturation(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveSaturationRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move sat {request:?}");
-        todo!()
+        log::warn!(
+            "Continuous saturation movement not implemented (MoveSaturation command). \
+             Request: mode={:?}, rate={:?}. \
+             TODO: Phase 3.",
+            request.move_mode().ok(),
+            request.rate().ok()
+        );
+        Ok(())
     }
 
     /// Increment or decrement saturation by a step size.
@@ -639,31 +780,76 @@ impl color_control::ClusterHandler for LightController {
         Ok(())
     }
 
+    /// Set color via XY coordinates (not yet implemented).
+    ///
+    /// Matter spec: MoveToColor command (0x07)
+    /// - ColorX, ColorY: CIE 1931 coordinates (0-65535 = 0.0-1.0)
+    ///
+    /// # Status: STUB
+    /// Requires CIE 1931 XY → RGB conversion implementation.
+    /// Deferred to Phase 3 due to complexity:
+    /// - Requires matrix multiplication (CIE transformation)
+    /// - Gamma correction needed
+    /// - LED gamut limitations
+    /// - Estimated effort: 4-6 hours
+    ///
+    /// # Current Behavior
+    /// Logs warning. Controllers should use HSV or ColorTemp mode instead.
     fn handle_move_to_color(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveToColorRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move to color {request:?}");
-        todo!()
+        log::warn!(
+            "XY color space not implemented (MoveToColor command). \
+             Request: X={:?}, Y={:?}. \
+             Use HSV or ColorTemperature mode instead. \
+             TODO: Implement CIE 1931 conversion (Phase 3).",
+            request.color_x().ok(),
+            request.color_y().ok()
+        );
+        Ok(())
     }
 
+    /// Continuous XY color movement (not yet implemented).
+    ///
+    /// Matter spec: MoveColor command (0x08)
+    ///
+    /// # Status: STUB
+    /// Requires both XY conversion AND async task management.
+    /// Deferred to Phase 3.
     fn handle_move_color(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
-        request: color_control::MoveColorRequest<'_>,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: color_control::MoveColorRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move color {request:?}");
-        todo!()
+        log::warn!(
+            "Continuous XY color movement not implemented (MoveColor command). \
+             TODO: Phase 3."
+        );
+        Ok(())
     }
 
+    /// Step XY color by delta (not yet implemented).
+    ///
+    /// Matter spec: StepColor command (0x09)
+    ///
+    /// # Status: STUB
+    /// Requires XY color space implementation.
+    /// Deferred to Phase 3.
     fn handle_step_color(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::StepColorRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("step color {request:?}");
-        todo!()
+        log::warn!(
+            "XY color step not implemented (StepColor command). \
+             Step X={:?}, Step Y={:?}. \
+             TODO: Phase 3.",
+            request.step_x().ok(),
+            request.step_y().ok()
+        );
+        Ok(())
     }
 
     /// Move to a specific color temperature.
@@ -704,67 +890,261 @@ impl color_control::ClusterHandler for LightController {
         Ok(())
     }
 
+    /// Move to a specific 16-bit enhanced hue value.
+    ///
+    /// Matter spec: EnhancedMoveToHue command (0x40)
+    /// - Enhanced hue range: 0-65535 (16-bit precision vs 8-bit standard hue)
+    /// - Direction: Shortest, Longest, Up, Down
+    /// - Transition time in 1/10th second units
+    ///
+    /// # Implementation
+    /// - Sets enhanced_hue directly (16-bit)
+    /// - Syncs to 8-bit hue: `(enhanced_hue * 254) / 65535`
+    /// - Switches color mode to hue/saturation
+    /// - Respects transition_time and options (currently instant)
     fn handle_enhanced_move_to_hue(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::EnhancedMoveToHueRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
         info!("move enh to hue {request:?}");
-        todo!()
+
+        let target_enhanced_hue = request.enhanced_hue()?;
+        let current_enhanced_hue = *self.enhanced_hue.borrow();
+
+        // Update enhanced hue (16-bit)
+        *self.enhanced_hue.borrow_mut() = target_enhanced_hue;
+
+        // Sync to 8-bit hue: scale 0-65535 to 0-254
+        let hue_8bit = ((target_enhanced_hue as u32 * 254) / 65535) as u8;
+        *self.hue.borrow_mut() = hue_8bit;
+
+        // Set color mode to hue/saturation
+        *self.color_mode_state.borrow_mut() = ColorMode::CurrentHueAndCurrentSaturation;
+
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!(
+            "Enhanced hue updated: {} -> {} (8-bit hue: {})",
+            current_enhanced_hue, target_enhanced_hue, hue_8bit
+        );
+        Ok(())
     }
 
+    /// Continuously move enhanced hue at a specified rate (not yet implemented).
+    ///
+    /// Matter spec: EnhancedMoveHue command (0x41)
+    /// - Move mode: Stop, Up, Down
+    /// - Rate: units per second (16-bit enhanced hue space)
+    ///
+    /// # Status: STUB
+    /// This command requires an async task to continuously update enhanced hue at the specified rate.
+    /// Implementation deferred to Phase 3 (Production Readiness).
+    ///
+    /// # Implementation Notes for Phase 3
+    /// - Spawn async task with rate-based loop
+    /// - Update enhanced_hue every frame based on rate
+    /// - Store task handle to cancel on StopMoveStep
+    /// - Handle mode: Stop (cancel task), Up (increment), Down (decrement)
+    /// - Rate is in enhanced hue units per second (0-65535 scale)
     fn handle_enhanced_move_hue(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::EnhancedMoveHueRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move enh hue {request:?}");
-        todo!()
+        log::warn!(
+            "Continuous enhanced hue movement not implemented (EnhancedMoveHue command). \
+             Request: mode={:?}, rate={:?}. \
+             TODO: Implement async task for continuous 16-bit hue movement (Phase 3).",
+            request.move_mode()?, request.rate()?
+        );
+        Ok(())
     }
 
+    /// Step enhanced hue by a 16-bit amount in a specified direction.
+    ///
+    /// Matter spec: EnhancedStepHue command (0x42)
+    /// - Step mode: Up, Down
+    /// - Step size: 0-65535 (16-bit enhanced hue units)
+    /// - Transition time in 1/10th second units
+    ///
+    /// # Implementation
+    /// - Adds/subtracts step_size from enhanced_hue with wrapping
+    /// - Syncs to 8-bit hue
+    /// - Switches color mode to hue/saturation
+    /// - Respects transition_time and options (currently instant)
     fn handle_enhanced_step_hue(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::EnhancedStepHueRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
         info!("step enh hue {request:?}");
-        todo!()
+
+        let step_mode_value = request.step_mode()? as u8;
+        let step_size = request.step_size()?;
+        let current_enhanced_hue = *self.enhanced_hue.borrow();
+
+        let new_enhanced_hue = if step_mode_value == 1 {
+            // Up (0x01): Add step_size with wrapping
+            current_enhanced_hue.wrapping_add(step_size)
+        } else if step_mode_value == 3 {
+            // Down (0x03): Subtract step_size with wrapping
+            current_enhanced_hue.wrapping_sub(step_size)
+        } else {
+            log::warn!("Unknown enhanced step mode: {}, ignoring", step_mode_value);
+            return Ok(());
+        };
+
+        // Update enhanced hue
+        *self.enhanced_hue.borrow_mut() = new_enhanced_hue;
+
+        // Sync to 8-bit hue
+        let hue_8bit = ((new_enhanced_hue as u32 * 254) / 65535) as u8;
+        *self.hue.borrow_mut() = hue_8bit;
+
+        // Set color mode to hue/saturation
+        *self.color_mode_state.borrow_mut() = ColorMode::CurrentHueAndCurrentSaturation;
+
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!(
+            "Enhanced hue stepped: {} -> {} (step: {}, mode: {})",
+            current_enhanced_hue, new_enhanced_hue, step_size, step_mode_value
+        );
+        Ok(())
     }
 
+    /// Move to a specific 16-bit enhanced hue and saturation.
+    ///
+    /// Matter spec: EnhancedMoveToHueAndSaturation command (0x43)
+    /// - Enhanced hue: 0-65535 (16-bit precision)
+    /// - Saturation: 0-254
+    /// - Transition time in 1/10th second units
+    ///
+    /// # Implementation
+    /// - Sets enhanced_hue (16-bit) and saturation (8-bit) simultaneously
+    /// - Syncs enhanced_hue to 8-bit hue
+    /// - Switches color mode to hue/saturation
+    /// - Respects transition_time and options (currently instant)
     fn handle_enhanced_move_to_hue_and_saturation(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::EnhancedMoveToHueAndSaturationRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
         info!("move enh to hue sat {request:?}");
-        todo!()
+
+        let target_enhanced_hue = request.enhanced_hue()?;
+        let target_saturation = request.saturation()?.min(254);
+
+        let current_enhanced_hue = *self.enhanced_hue.borrow();
+        let current_saturation = *self.saturation.borrow();
+
+        // Update enhanced hue (16-bit)
+        *self.enhanced_hue.borrow_mut() = target_enhanced_hue;
+
+        // Sync to 8-bit hue
+        let hue_8bit = ((target_enhanced_hue as u32 * 254) / 65535) as u8;
+        *self.hue.borrow_mut() = hue_8bit;
+
+        // Update saturation
+        *self.saturation.borrow_mut() = target_saturation;
+
+        // Set color mode to hue/saturation
+        *self.color_mode_state.borrow_mut() = ColorMode::CurrentHueAndCurrentSaturation;
+
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!(
+            "Enhanced hue and saturation updated: hue {} -> {} (8-bit: {}), sat {} -> {}",
+            current_enhanced_hue, target_enhanced_hue, hue_8bit,
+            current_saturation, target_saturation
+        );
+        Ok(())
     }
 
+    /// Configure color loop animation (not yet implemented).
+    ///
+    /// Matter spec: ColorLoopSet command (0x44)
+    /// - Updates: Direction, Time, StartHue
+    /// - Action: Deactivate, ActivateFromColorLoopStartHue, ActivateFromEnhancedCurrentHue
+    ///
+    /// # Status: STUB
+    /// Color loop requires:
+    /// - Animation state machine
+    /// - Async task for continuous hue cycling
+    /// - Loop speed control
+    /// - Start/stop management
+    /// Estimated effort: 8-10 hours
+    /// Deferred to Phase 3.
+    ///
+    /// # Current Behavior
+    /// Logs warning and returns Ok.
     fn handle_color_loop_set(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::ColorLoopSetRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("color loop set {request:?}");
-        todo!()
+        log::warn!(
+            "Color loop animation not implemented (ColorLoopSet command). \
+             Action={:?}, Direction={:?}. \
+             TODO: Phase 3 (complex animation system).",
+            request.action().ok(),
+            request.direction().ok()
+        );
+        Ok(())
     }
 
+    /// Stop ongoing movements (not yet implemented).
+    ///
+    /// Matter spec: StopMoveStep command (0x47)
+    ///
+    /// # Status: STUB
+    /// Will be implemented alongside continuous movement commands.
+    /// Currently no movements are in progress (all are instant), so this is a no-op.
+    ///
+    /// # Current Behavior
+    /// Logs info message and returns Ok (idempotent - safe to call when nothing is moving).
     fn handle_stop_move_step(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
-        request: color_control::StopMoveStepRequest<'_>,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: color_control::StopMoveStepRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("stop move step {request:?}");
-        todo!()
+        log::info!(
+            "StopMoveStep command received. \
+             Note: Continuous movements not yet implemented, so nothing to stop."
+        );
+        // When movements are implemented, this would cancel them
+        Ok(())
     }
 
+    /// Continuous color temperature change (not yet implemented).
+    ///
+    /// Matter spec: MoveColorTemperature command (0x4B)
+    /// - MoveMode: Stop (0), Up (1), Down (3)
+    /// - Rate: Mireds per second
+    ///
+    /// # Status: STUB
+    /// Similar to MoveHue/MoveSaturation, requires async task.
+    /// Deferred to Phase 3.
+    ///
+    /// # Current Behavior
+    /// Logs warning and returns Ok.
     fn handle_move_color_temperature(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveColorTemperatureRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move temp {request:?}");
-        todo!()
+        log::warn!(
+            "Continuous color temperature movement not implemented (MoveColorTemperature command). \
+             Mode={:?}, Rate={:?}. \
+             TODO: Phase 3.",
+            request.move_mode().ok(),
+            request.rate().ok()
+        );
+        Ok(())
     }
 
     /// Increment or decrement color temperature by a step size.

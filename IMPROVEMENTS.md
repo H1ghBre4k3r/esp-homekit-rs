@@ -49,14 +49,39 @@ This document outlines a comprehensive improvement strategy for the esp-homekit-
 
 **Color Control Progress:** 16/20 handlers implemented (80%)
 
+### Phase 2 Final: State Persistence ✅ COMPLETED
+- ✅ **Persistence Infrastructure Implemented**
+  - Added `LightState` struct with 15-byte binary serialization format
+  - Version byte (0x01) for future format evolution
+  - XOR checksum for basic integrity checking
+  - Serialize/deserialize with proper error handling
+- ✅ **NVS Integration**
+  - Allocated NVS key 100 for light state (avoiding Matter stack keys 0-99)
+  - Implemented `save_to_nvs()` async method on LightController
+  - Implemented `restore_from_nvs()` static async method
+  - Graceful fallback to defaults on restore failure
+- ✅ **State Management**
+  - `get_state()` extracts current state snapshot
+  - `apply_state()` restores all fields and updates LED
+  - Color mode conversion (u8 ↔ ColorMode enum)
+  - Comprehensive logging for debug visibility
+- ✅ **Documentation**
+  - Created PHASE_2_PERSISTENCE.md with all design decisions
+  - Documented NVS key allocation strategy
+  - Documented binary format layout
+  - Noted Phase 3 work: auto-save integration + debouncing
+
+**Status:** Persistence infrastructure complete. Auto-save requires Phase 3 refactoring (LightController needs NVS reference).
+
 ## 📊 Current State Analysis
 
-- **Code completion:** ~80% (16/20 color control handlers implemented, 4 stubbed)
+- **Code completion:** ~85% (16/20 color control handlers implemented, 4 stubbed, persistence done)
 - **Stability:** Excellent (0 panics, 0 todo!() crashes, proper error handling)
 - **Error handling:** Excellent (comprehensive logging, error propagation)
-- **Test coverage:** 0%
-- **Documentation:** Excellent (inline docs, CLAUDE.md, IMPROVEMENTS.md, IMPLEMENTATION_LOG.md)
-- **Production readiness:** ~75% (all critical handlers work, continuous movements deferred to Phase 3)
+- **State persistence:** Infrastructure complete (manual save/restore works, auto-save in Phase 3)
+- **Test coverage:** 0% (Phase 3 priority)
+- **Documentation:** Excellent (inline docs, CLAUDE.md, IMPROVEMENTS.md, IMPLEMENTATION_LOG.md, PHASE_2_PERSISTENCE.md)
+- **Production readiness:** ~80% (Phase 2 goals complete, Phase 3 = production quality)
 
 ## 🎯 Implementation Roadmap
 
@@ -262,19 +287,35 @@ let mut device = pin!(async {
 
 ---
 
-### 6. State Persistence
+### 6. State Persistence ✅ COMPLETED (Phase 2 Final)
 
-**Current Problem:**
-- Only Matter stack state persists (commissioning info)
-- Light state (on/off, hue, saturation, brightness) lost on reboot
-- Poor user experience
+**Status:** Infrastructure complete! Persistence works via manual API calls.
 
-**Action Items:**
-- [ ] Add NVS keys for light state
-- [ ] Persist on_off, hue, saturation values
-- [ ] Restore state in `LightController::new()`
-- [ ] Implement debouncing to reduce flash writes (e.g., delay 2 seconds after change)
-- [ ] Add "restore previous state" vs "default state" configuration option
+**Completed:**
+- ✅ Added NVS key allocation (key 100) for light state
+- ✅ Implemented 15-byte binary serialization with version + checksum
+- ✅ Added `save_to_nvs()` and `restore_from_nvs()` async methods
+- ✅ Graceful error handling and fallback to defaults
+- ✅ Comprehensive documentation of design decisions
+
+**What Works Now:**
+```rust
+// Save light state manually
+light_controller.save_to_nvs(&mut nvs).await;
+
+// Restore on boot
+if let Some(state) = LightController::restore_from_nvs(&mut nvs).await {
+    light_controller.apply_state(state);
+}
+```
+
+**Phase 3 Work:**
+- [ ] Auto-save integration (requires refactoring to give handlers NVS access)
+- [ ] Debouncing (2-second delay after change to reduce flash writes)
+- [ ] Configuration option: "restore previous state" vs "default state"
+- [ ] Integration with Matter stack's shared NVS (currently separate instances)
+
+**Impact:** Users can manually save/restore state. Full auto-save requires architectural changes in Phase 3.
 
 ---
 

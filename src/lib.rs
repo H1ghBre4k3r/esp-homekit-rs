@@ -11,6 +11,7 @@ use rs_matter::{
     utils::{cell::RefCell, maybe::Maybe},
     with,
 };
+use rs_matter_embassy::stack::persist::KvBlobStore;
 
 use crate::color_control::{ColorMode, CommandId, Feature};
 use smart_leds::{SmartLedsWrite as _, RGB8};
@@ -29,6 +30,120 @@ macro_rules! mk_static {
 }
 
 type Led = SmartLedsAdapter<ConstChannelAccess<Tx, 0>, 25>;
+
+/// Serializable light state for NVS persistence.
+///
+/// This struct contains all the color and on/off state that should survive reboots.
+/// Serialized format is 15 bytes with version byte and checksum.
+///
+/// # Binary Layout (15 bytes)
+/// ```text
+/// [0]: VERSION (0x01)
+/// [1]: on_off (bool as u8)
+/// [2]: hue
+/// [3]: saturation
+/// [4-5]: current_x (little-endian u16)
+/// [6-7]: current_y (little-endian u16)
+/// [8-9]: color_temperature_mireds (little-endian u16)
+/// [10-11]: enhanced_hue (little-endian u16)
+/// [12]: color_mode_state (u8)
+/// [13]: options
+/// [14]: checksum (XOR of bytes 0-13)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LightState {
+    on_off: bool,
+    hue: u8,
+    saturation: u8,
+    current_x: u16,
+    current_y: u16,
+    color_temperature_mireds: u16,
+    enhanced_hue: u16,
+    color_mode_state: u8,  // ColorMode as u8
+    options: u8,
+}
+
+impl LightState {
+    /// NVS storage format version
+    const VERSION: u8 = 0x01;
+
+    /// NVS key for light state (keys 0-99 reserved for Matter stack)
+    const NVS_KEY: u16 = 100;
+
+    /// Size of serialized state (15 bytes)
+    const SERIALIZED_SIZE: usize = 15;
+
+    /// Serialize light state to 15-byte binary format.
+    ///
+    /// Format: [VERSION|on_off|hue|sat|x_lo|x_hi|y_lo|y_hi|temp_lo|temp_hi|enh_lo|enh_hi|mode|opts|checksum]
+    ///
+    /// Returns a 15-byte array ready for NVS storage.
+    fn serialize(&self) -> [u8; Self::SERIALIZED_SIZE] {
+        let mut bytes = [0u8; Self::SERIALIZED_SIZE];
+
+        bytes[0] = Self::VERSION;
+        bytes[1] = if self.on_off { 1 } else { 0 };
+        bytes[2] = self.hue;
+        bytes[3] = self.saturation;
+
+        // Little-endian u16 values
+        bytes[4..6].copy_from_slice(&self.current_x.to_le_bytes());
+        bytes[6..8].copy_from_slice(&self.current_y.to_le_bytes());
+        bytes[8..10].copy_from_slice(&self.color_temperature_mireds.to_le_bytes());
+        bytes[10..12].copy_from_slice(&self.enhanced_hue.to_le_bytes());
+
+        bytes[12] = self.color_mode_state;
+        bytes[13] = self.options;
+
+        // Checksum: XOR of all data bytes
+        bytes[14] = Self::compute_checksum(&bytes[0..14]);
+
+        bytes
+    }
+
+    /// Deserialize light state from 15-byte binary format.
+    ///
+    /// Returns `Ok(LightState)` on success, or `Err` with reason if:
+    /// - Wrong size
+    /// - Version mismatch
+    /// - Checksum invalid
+    fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() != Self::SERIALIZED_SIZE {
+            return Err("Invalid size");
+        }
+
+        // Check version
+        if bytes[0] != Self::VERSION {
+            return Err("Version mismatch");
+        }
+
+        // Verify checksum
+        let expected_checksum = Self::compute_checksum(&bytes[0..14]);
+        if bytes[14] != expected_checksum {
+            return Err("Checksum mismatch");
+        }
+
+        // Deserialize fields
+        Ok(LightState {
+            on_off: bytes[1] != 0,
+            hue: bytes[2],
+            saturation: bytes[3],
+            current_x: u16::from_le_bytes([bytes[4], bytes[5]]),
+            current_y: u16::from_le_bytes([bytes[6], bytes[7]]),
+            color_temperature_mireds: u16::from_le_bytes([bytes[8], bytes[9]]),
+            enhanced_hue: u16::from_le_bytes([bytes[10], bytes[11]]),
+            color_mode_state: bytes[12],
+            options: bytes[13],
+        })
+    }
+
+    /// Compute XOR checksum of data bytes.
+    ///
+    /// Simple checksum for basic integrity checking. XORs all bytes together.
+    fn compute_checksum(data: &[u8]) -> u8 {
+        data.iter().fold(0u8, |acc, &byte| acc ^ byte)
+    }
+}
 
 /// Light controller managing state for a color-controllable light endpoint.
 ///
@@ -133,6 +248,152 @@ impl LightController {
 
             // No options set by default
             options: RefCell::new(0),
+        }
+    }
+
+    /// Extract current light state for persistence.
+    ///
+    /// Returns a `LightState` snapshot of all color/on-off settings.
+    /// This can be serialized and saved to NVS.
+    fn get_state(&self) -> LightState {
+        LightState {
+            on_off: *self.on_off.borrow(),
+            hue: *self.hue.borrow(),
+            saturation: *self.saturation.borrow(),
+            current_x: *self.current_x.borrow(),
+            current_y: *self.current_y.borrow(),
+            color_temperature_mireds: *self.color_temperature_mireds.borrow(),
+            enhanced_hue: *self.enhanced_hue.borrow(),
+            color_mode_state: *self.color_mode_state.borrow() as u8,
+            options: *self.options.borrow(),
+        }
+    }
+
+    /// Apply a saved light state to this controller.
+    ///
+    /// Updates all color fields and LED output to match the restored state.
+    /// This is called on boot after successfully restoring from NVS.
+    ///
+    /// # Arguments
+    /// * `state` - The state to restore (from NVS)
+    fn apply_state(&self, state: LightState) {
+        *self.on_off.borrow_mut() = state.on_off;
+        *self.hue.borrow_mut() = state.hue;
+        *self.saturation.borrow_mut() = state.saturation;
+        *self.current_x.borrow_mut() = state.current_x;
+        *self.current_y.borrow_mut() = state.current_y;
+        *self.color_temperature_mireds.borrow_mut() = state.color_temperature_mireds;
+        *self.enhanced_hue.borrow_mut() = state.enhanced_hue;
+        *self.options.borrow_mut() = state.options;
+
+        // Restore color mode (convert u8 back to enum)
+        *self.color_mode_state.borrow_mut() = match state.color_mode_state {
+            0 => ColorMode::CurrentHueAndCurrentSaturation,
+            1 => ColorMode::CurrentXAndCurrentY,
+            2 => ColorMode::ColorTemperature,
+            _ => {
+                log::warn!("Unknown color mode {}, defaulting to HSV", state.color_mode_state);
+                ColorMode::CurrentHueAndCurrentSaturation
+            }
+        };
+
+        // Update LED to reflect restored state
+        self.update_led();
+
+        info!(
+            "Restored state: on={}, hue={}, sat={}, mode={:?}",
+            state.on_off,
+            state.hue,
+            state.saturation,
+            *self.color_mode_state.borrow()
+        );
+    }
+
+    /// Save current light state to NVS.
+    ///
+    /// Serializes the current color/on-off state and writes it to NVS key 100.
+    /// This allows the state to survive reboots.
+    ///
+    /// # Phase 2 Note
+    /// This method must be called manually. Automatic save-on-change will be
+    /// implemented in Phase 3 when refactoring the controller architecture.
+    ///
+    /// # Errors
+    /// Returns error if NVS write fails.
+    pub async fn save_to_nvs(&self, nvs: &mut crate::nvs::Nvs) -> Result<(), &'static str> {
+        let state = self.get_state();
+        let data = state.serialize();
+
+        info!("Saving light state to NVS (key {})", LightState::NVS_KEY);
+
+        // Use NVS store method with 32-byte buffer (15 bytes used + padding)
+        let mut buf = [0u8; 32];
+        buf[..LightState::SERIALIZED_SIZE].copy_from_slice(&data);
+
+        nvs.store(LightState::NVS_KEY, &mut buf, |out_buf| {
+            out_buf[..LightState::SERIALIZED_SIZE].copy_from_slice(&data);
+            Ok(LightState::SERIALIZED_SIZE)
+        })
+        .await
+        .map_err(|_: rs_matter::error::Error| "NVS write failed")?;
+
+        info!("Light state saved successfully");
+        Ok(())
+    }
+
+    /// Restore light state from NVS if available.
+    ///
+    /// Reads saved state from NVS key 100 and returns it if valid.
+    /// Returns `None` if no state saved (first boot) or if restore fails.
+    ///
+    /// # Usage
+    /// Call during initialization to restore previous state:
+    /// ```ignore
+    /// let controller = LightController::new(dataver, led);
+    /// if let Some(state) = LightController::restore_from_nvs(&mut nvs).await {
+    ///     controller.apply_state(state);
+    /// }
+    /// ```
+    pub async fn restore_from_nvs(nvs: &mut crate::nvs::Nvs) -> Option<LightState> {
+        info!("Attempting to restore light state from NVS (key {})", LightState::NVS_KEY);
+
+        let mut buf = [0u8; 32];
+
+        // Try to load data from NVS
+        let result: Result<(), rs_matter::error::Error> = nvs
+            .load(LightState::NVS_KEY, &mut buf, |data| {
+                match data {
+                    Some(bytes) if bytes.len() >= LightState::SERIALIZED_SIZE => {
+                        // Data exists and has correct size
+                        Ok(())
+                    }
+                    Some(_) => {
+                        log::warn!("Saved state has invalid size");
+                        Ok(())
+                    }
+                    None => {
+                        // No saved state (first boot)
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+
+        if result.is_err() {
+            log::error!("Failed to read from NVS: {:?}", result);
+            return None;
+        }
+
+        // Try to deserialize
+        match LightState::deserialize(&buf[..LightState::SERIALIZED_SIZE]) {
+            Ok(state) => {
+                info!("Successfully restored light state from NVS");
+                Some(state)
+            }
+            Err(e) => {
+                log::error!("Failed to deserialize state: {}", e);
+                None
+            }
         }
     }
 

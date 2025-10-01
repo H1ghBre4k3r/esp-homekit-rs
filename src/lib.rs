@@ -84,9 +84,13 @@ impl LightController {
             let sat = *self.saturation.borrow();
             let RGB8 { r, g, b } = hsv_to_rgb(hue, sat, 100);
             // Note: LED has swapped R and G channels
-            led.write([RGB8 { r: g, g: r, b }]).unwrap();
+            if let Err(e) = led.write([RGB8 { r: g, g: r, b }]) {
+                log::error!("Failed to write LED color: {:?}", e);
+            }
         } else {
-            led.write([RGB8 { r: 0, g: 0, b: 0 }]).unwrap();
+            if let Err(e) = led.write([RGB8 { r: 0, g: 0, b: 0 }]) {
+                log::error!("Failed to turn off LED: {:?}", e);
+            }
         }
     }
 

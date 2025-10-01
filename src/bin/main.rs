@@ -14,11 +14,7 @@
 #![no_main]
 #![recursion_limit = "256"]
 
-use core::pin::pin;
-
 use embassy_executor::Spawner;
-use embassy_futures::select::select;
-use embassy_time::{Duration, Timer};
 
 use esp_alloc::heap_allocator;
 use esp_backtrace as _;
@@ -37,7 +33,6 @@ use rs_matter_embassy::matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter_embassy::matter::dm::clusters::on_off::{self};
 use rs_matter_embassy::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter_embassy::matter::dm::{Async, Dataver, EmptyHandler, Endpoint, EpClMatcher, Node};
-use rs_matter_embassy::matter::utils::select::Coalesce;
 use rs_matter_embassy::matter::{clusters, devices};
 use rs_matter_embassy::rand::esp::{esp_init_rand, esp_rand};
 use rs_matter_embassy::wireless::esp::EspWifiDriver;
@@ -65,7 +60,9 @@ async fn main(_s: Spawner) {
     // == Step 1: ==
     // Necessary `esp-hal` and `esp-wifi` initialization boilerplate
     let peripherals = esp_hal::init(esp_hal::Config::default());
-    let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
+
+    let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80))
+        .expect("Failed to initialize RMT peripheral for LED control");
     let led: SmartLedsAdapter<ConstChannelAccess<Tx, 0>, 25> =
         SmartLedsAdapter::new(rmt.channel0, peripherals.GPIO8, smart_led_buffer!(1));
 
@@ -76,7 +73,8 @@ async fn main(_s: Spawner) {
     // so we need to initialize the global `rand` fn once
     esp_init_rand(rng);
 
-    let init = esp_wifi::init(timg0.timer0, rng).unwrap();
+    let init = esp_wifi::init(timg0.timer0, rng)
+        .expect("Failed to initialize WiFi/BLE - check hardware and heap size");
 
     esp_hal_embassy::init(esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER).alarm0);
 
@@ -84,12 +82,31 @@ async fn main(_s: Spawner) {
     // Allocate the Matter stack.
     // For MCUs, it is best to allocate it statically, so as to avoid program stack blowups (its memory footprint is ~ 35 to 50KB).
     // It is also (currently) a mandatory requirement when the wireless stack variation is used.
+    //
+    // ⚠️  SECURITY WARNING: Using test credentials - NOT SUITABLE FOR PRODUCTION ⚠️
+    //
+    // The TEST_DEV_* credentials below are shared test credentials from the Matter SDK.
+    // They are suitable for development and testing ONLY.
+    //
+    // For production deployment, you MUST:
+    // 1. Generate unique device attestation credentials for each device
+    // 2. Use a secure provisioning process to store credentials
+    // 3. Consider storing credentials in encrypted flash or secure element
+    // 4. Follow Matter DAC (Device Attestation Certificate) requirements
+    //
+    // Using shared credentials in production:
+    // - Allows impersonation of your devices
+    // - Prevents proper device identification
+    // - Violates Matter certification requirements
+    // - Creates security vulnerabilities
+    //
+    // See IMPROVEMENTS.md for guidance on production credential management.
     let stack = mk_static!(
         EmbassyWifiMatterStack<'_, BUMP_SIZE, ()>,
         EmbassyWifiMatterStack::<BUMP_SIZE, ()>::new(
-            &TEST_DEV_DET,
-            TEST_DEV_COMM,
-            &TEST_DEV_ATT,
+            &TEST_DEV_DET,   // ⚠️ Test device details - replace for production
+            TEST_DEV_COMM,   // ⚠️ Test commissioning info - replace for production
+            &TEST_DEV_ATT,   // ⚠️ Test attestation - replace for production
             epoch,
             esp_rand,
         )
@@ -134,44 +151,22 @@ async fn main(_s: Spawner) {
     // not being very intelligent w.r.t. stack usage in async functions
     // This step can be repeated in that the stack can be stopped and started multiple times, as needed.
     let store = stack.create_shared_store(Nvs::new());
-    let mut matter = pin!(stack.run_coex(
-        // The Matter stack needs to instantiate an `embassy-net` `Driver` and `Controller`
-        EmbassyWifi::new(
-            EspWifiDriver::new(&init, peripherals.WIFI, peripherals.BT),
-            stack,
-        ),
-        // The Matter stack needs a persister to store its state
-        &store,
-        // Our `AsyncHandler` + `AsyncMetadata` impl
-        (NODE, handler),
-        // No user future to run
-        (),
-    ));
-
-    // Just for demoing purposes:
-    //
-    // Run a sample loop that simulates state changes triggered by the HAL
-    // Changes will be properly communicated to the Matter controllers
-    // (i.e. Google Home, Alexa) and other Matter devices thanks to subscriptions
-    let mut device = pin!(async {
-        loop {
-            // Simulate user toggling the light with a physical switch every 5 seconds
-            Timer::after(Duration::from_secs(5)).await;
-
-            // Toggle
-            let current = light_controller.get_on_off();
-            light_controller.set_on_off(!current);
-
-            // Let the Matter stack know that we have changed
-            // the state of our Light device
-            stack.notify_changed();
-
-            info!("Light toggled");
-        }
-    });
-
-    // Schedule the Matter run & the device loop together
-    select(&mut matter, &mut device).coalesce().await.unwrap();
+    stack
+        .run_coex(
+            // The Matter stack needs to instantiate an `embassy-net` `Driver` and `Controller`
+            EmbassyWifi::new(
+                EspWifiDriver::new(&init, peripherals.WIFI, peripherals.BT),
+                stack,
+            ),
+            // The Matter stack needs a persister to store its state
+            &store,
+            // Our `AsyncHandler` + `AsyncMetadata` impl
+            (NODE, handler),
+            // No user future to run
+            (),
+        )
+        .await
+        .expect("Matter stack encountered fatal error");
 }
 
 /// Endpoint 0 (the root endpoint) always runs

@@ -6,6 +6,22 @@ use rs_matter_embassy::stack::persist::KvBlobStore;
 
 use crate::mk_static;
 
+/// Simple key-value storage implementation using ESP32 NVS partition.
+///
+/// # Warning
+///
+/// This is a simplified NVS implementation with the following limitations:
+/// - **No wear leveling**: Flash cells will wear out over time with repeated writes
+/// - **Simple offset-based addressing**: Uses `(key + 1) * buffer_size` for data location
+/// - **No garbage collection**: Removed data is marked invalid but space is not reclaimed
+/// - **Limited key space**: Keys must be small enough that offsets fit in partition
+/// - **No crash recovery**: Partial writes may leave inconsistent state
+///
+/// For production use, consider:
+/// - Implementing proper wear leveling
+/// - Using ESP-IDF's native NVS library (via `esp-idf-svc`)
+/// - Adding checksums for data integrity
+/// - Implementing atomic write-verify-commit sequences
 pub struct Nvs {
     region: FlashRegion<'static, FlashStorage>,
 }
@@ -42,13 +58,16 @@ impl Nvs {
 
 impl Nvs {
     async fn has(&mut self, key: u16) -> bool {
-        let mut buf = [0u8; 32];
+        let mut validity_flag = [0u8; 1];
 
-        if let Err(e) = self.region.read(0, &mut buf) {
-            panic!("{e}");
+        // Read the validity flag at the key's offset
+        // 0 = data present, 255 = data removed/not present
+        if let Err(e) = self.region.read(key as u32, &mut validity_flag) {
+            log::error!("Failed to check existence of key {}: {:?}", key, e);
+            return false;
         }
 
-        buf[key as usize] == 0
+        validity_flag[0] == 0
     }
 }
 
@@ -63,21 +82,22 @@ impl KvBlobStore for Nvs {
         F: FnOnce(Option<&[u8]>) -> Result<(), rs_matter_embassy::matter::error::Error>,
     {
         let index = (key as usize + 1) * buf.len();
-        info!("LOADING: {index}");
+        info!("LOADING: key={}, offset={}", key, index);
 
+        // Check if data exists for this key
         if !self.has(key).await {
+            // No data for this key, invoke callback with None
             return cb(None);
         }
 
+        // Read the data from flash
         if let Err(e) = self.region.read(index as u32, buf) {
-            panic!("{e}");
+            log::error!("Failed to read data for key {} at offset {}: {:?}", key, index, e);
+            return cb(None);
         }
 
-        if let Err(e) = cb(Some(buf)) {
-            log::error!("{e}");
-        }
-
-        Ok(())
+        // Invoke callback with the data
+        cb(Some(buf))
     }
 
     async fn store<F>(
@@ -90,18 +110,25 @@ impl KvBlobStore for Nvs {
         F: FnOnce(&mut [u8]) -> Result<usize, rs_matter_embassy::matter::error::Error>,
     {
         let index = (key as usize + 1) * buf.len();
-        info!("STORING: {index}");
+        info!("STORING: key={}, offset={}", key, index);
 
-        if let Err(e) = cb(buf) {
-            log::error!("{e}");
-        }
+        // Let the callback fill the buffer with data to store
+        let _len = cb(buf)?;
 
+        // Write the data to flash
         if let Err(e) = self.region.write(index as u32, buf) {
-            panic!("{e}");
+            log::error!("Failed to write data for key {} at offset {}: {:?}", key, index, e);
+            return Err(rs_matter_embassy::matter::error::Error::new(
+                rs_matter_embassy::matter::error::ErrorCode::NoSpace
+            ));
         }
 
+        // Mark the data as valid by writing 0 to the validity flag
         if let Err(e) = self.region.write(key as u32, &[0]) {
-            panic!("{e}");
+            log::error!("Failed to write validity flag for key {}: {:?}", key, e);
+            return Err(rs_matter_embassy::matter::error::Error::new(
+                rs_matter_embassy::matter::error::ErrorCode::NoSpace
+            ));
         }
 
         Ok(())
@@ -112,10 +139,15 @@ impl KvBlobStore for Nvs {
         key: u16,
         _buf: &mut [u8],
     ) -> Result<(), rs_matter_embassy::matter::error::Error> {
+        // Mark data as removed by writing 255 to the validity flag
         if let Err(e) = self.region.write(key as u32, &[255]) {
-            panic!("{e}");
+            log::error!("Failed to remove key {}: {:?}", key, e);
+            return Err(rs_matter_embassy::matter::error::Error::new(
+                rs_matter_embassy::matter::error::ErrorCode::NoSpace
+            ));
         }
 
+        info!("Removed key={}", key);
         Ok(())
     }
 }

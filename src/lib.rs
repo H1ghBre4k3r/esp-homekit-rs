@@ -30,12 +30,44 @@ macro_rules! mk_static {
 
 type Led = SmartLedsAdapter<ConstChannelAccess<Tx, 0>, 25>;
 
+/// Light controller managing state for a color-controllable light endpoint.
+///
+/// # Color Representations
+///
+/// This controller supports multiple color representations as per Matter spec:
+/// - **HSV**: Hue (0-254), Saturation (0-254), Value (brightness)
+/// - **XY**: CIE 1931 color space, X and Y coordinates (0-65535 = 0.0-1.0)
+/// - **Color Temperature**: Mireds (reciprocal megakelvin)
+/// - **Enhanced Hue**: 16-bit hue (0-65535) for finer control
+///
+/// The `color_mode_state` tracks which representation is currently active.
+/// When a command sets a specific color space, the mode switches accordingly.
 pub struct LightController {
     dataver: Dataver,
     led: RefCell<Led>,
+
+    // Basic on/off state
     on_off: RefCell<bool>,
-    hue: RefCell<u8>,
-    saturation: RefCell<u8>,
+
+    // HSV color space (Matter spec: max values are 254, not 255!)
+    hue: RefCell<u8>,           // 0-254 (circular)
+    saturation: RefCell<u8>,    // 0-254
+
+    // CIE 1931 XY color space (Matter spec: 0-65535 represents 0.0-1.0)
+    current_x: RefCell<u16>,    // X coordinate
+    current_y: RefCell<u16>,    // Y coordinate
+
+    // Color temperature mode
+    color_temperature_mireds: RefCell<u16>,  // Mireds (1,000,000 / Kelvin)
+
+    // Enhanced (16-bit) hue for finer control
+    enhanced_hue: RefCell<u16>,  // 0-65535
+
+    // Active color mode (which representation is primary)
+    color_mode_state: RefCell<ColorMode>,
+
+    // Options bitmap from set_options command
+    options: RefCell<u8>,
 }
 
 impl LightController {
@@ -65,29 +97,89 @@ impl LightController {
         ))
         .with_features(Feature::all().bits());
 
+    /// Create a new LightController with default color values.
+    ///
+    /// # Default Color State
+    /// - Off state
+    /// - Hue: 0 (red)
+    /// - Saturation: 0 (white - no color)
+    /// - XY: (0.375, 0.375) - neutral white point
+    /// - Color temperature: 370 mireds (≈2700K warm white)
+    /// - Color mode: CurrentHueAndCurrentSaturation (HSV mode)
     pub fn new(dataver: Dataver, led: Led) -> Self {
         LightController {
             dataver,
             led: RefCell::new(led),
             on_off: RefCell::new(false),
+
+            // HSV defaults (saturation=0 = white)
             hue: RefCell::new(0),
             saturation: RefCell::new(0),
+
+            // XY defaults (neutral white point ~0.375, 0.375)
+            // Matter spec: 0-65535 represents 0.0-1.0
+            current_x: RefCell::new(0x6000),  // ~0.375
+            current_y: RefCell::new(0x6000),  // ~0.375
+
+            // Color temperature default (370 mireds ≈ 2700K warm white)
+            // Mireds = 1,000,000 / Kelvin
+            color_temperature_mireds: RefCell::new(370),
+
+            // Enhanced hue (16-bit) synced with standard hue
+            enhanced_hue: RefCell::new(0),
+
+            // Start in HSV mode (matches hue/saturation fields)
+            color_mode_state: RefCell::new(ColorMode::CurrentHueAndCurrentSaturation),
+
+            // No options set by default
+            options: RefCell::new(0),
         }
     }
 
+    /// Update the physical LED based on current color state.
+    ///
+    /// This respects the current color mode:
+    /// - HSV mode: Use hue and saturation
+    /// - XY mode: TODO - Phase 2b (currently falls back to HSV)
+    /// - ColorTemperature mode: Use color temperature
+    ///
+    /// # Hardware Note
+    /// The physical LED has swapped R and G channels - we compensate for this.
     fn update_led(&self) {
         let on = *self.on_off.borrow();
         let mut led = self.led.borrow_mut();
 
         if on {
-            let hue = *self.hue.borrow();
-            let sat = *self.saturation.borrow();
-            let RGB8 { r, g, b } = hsv_to_rgb(hue, sat, 100);
-            // Note: LED has swapped R and G channels
+            let mode = self.get_color_mode();
+
+            // Convert current color state to RGB based on active mode
+            let rgb = match mode {
+                ColorMode::CurrentHueAndCurrentSaturation => {
+                    let hue = *self.hue.borrow();
+                    let sat = *self.saturation.borrow();
+                    hsv_to_rgb(hue, sat, 100)
+                }
+                ColorMode::CurrentXAndCurrentY => {
+                    // TODO: Implement XY to RGB conversion (Phase 2b - Step 4)
+                    // For now, fall back to HSV
+                    log::warn!("XY color mode not yet implemented, falling back to HSV");
+                    let hue = *self.hue.borrow();
+                    let sat = *self.saturation.borrow();
+                    hsv_to_rgb(hue, sat, 100)
+                }
+                ColorMode::ColorTemperature => {
+                    let mireds = *self.color_temperature_mireds.borrow();
+                    color_temp_to_rgb(mireds)
+                }
+            };
+
+            // Hardware compensation: LED has swapped R and G channels
+            let RGB8 { r, g, b } = rgb;
             if let Err(e) = led.write([RGB8 { r: g, g: r, b }]) {
                 log::error!("Failed to write LED color: {:?}", e);
             }
         } else {
+            // Light is off - set to black
             if let Err(e) = led.write([RGB8 { r: 0, g: 0, b: 0 }]) {
                 log::error!("Failed to turn off LED: {:?}", e);
             }
@@ -106,8 +198,71 @@ impl LightController {
     fn notify_dataver_changed(&self) {
         self.dataver.changed();
     }
+
+    /// Get the current color mode.
+    fn get_color_mode(&self) -> ColorMode {
+        *self.color_mode_state.borrow()
+    }
+
+    /// Set the color mode and sync related state.
+    ///
+    /// When switching modes, we sync the representations:
+    /// - Switching to HSV: Keep hue/saturation
+    /// - Switching to XY: Keep current_x/current_y
+    /// - Switching to ColorTemperature: Keep color_temperature_mireds
+    fn set_color_mode(&self, mode: ColorMode) {
+        *self.color_mode_state.borrow_mut() = mode;
+    }
+
+    /// Synchronize standard hue (8-bit) with enhanced hue (16-bit).
+    ///
+    /// Matter spec:
+    /// - Standard hue: 0-254 (not 255!)
+    /// - Enhanced hue: 0-65535
+    ///
+    /// Conversion: enhanced = (standard * 65535) / 254
+    fn sync_hue_to_enhanced(&self) {
+        let hue = *self.hue.borrow() as u32;
+        let enhanced = ((hue * 65535) / 254) as u16;
+        *self.enhanced_hue.borrow_mut() = enhanced;
+    }
+
+    /// Synchronize enhanced hue (16-bit) to standard hue (8-bit).
+    ///
+    /// Conversion: standard = (enhanced * 254) / 65535
+    fn sync_enhanced_to_hue(&self) {
+        let enhanced = *self.enhanced_hue.borrow() as u32;
+        let hue = ((enhanced * 254) / 65535) as u8;
+        *self.hue.borrow_mut() = hue;
+    }
+
+    /// Set hue value and sync enhanced hue.
+    ///
+    /// Matter spec: Hue max is 254 (not 255!), range is 0-254.
+    fn set_hue(&self, hue: u8) {
+        let clamped_hue = hue.min(254);
+        *self.hue.borrow_mut() = clamped_hue;
+        self.sync_hue_to_enhanced();
+    }
+
+    /// Set saturation value.
+    ///
+    /// Matter spec: Saturation max is 254 (not 255!), range is 0-254.
+    fn set_saturation(&self, saturation: u8) {
+        let clamped_sat = saturation.min(254);
+        *self.saturation.borrow_mut() = clamped_sat;
+    }
 }
 
+/// Convert HSV color to RGB.
+///
+/// # Parameters
+/// - `h`: Hue (0-254 for Matter, but we accept 0-255 for compatibility)
+/// - `s`: Saturation (0-255, where 0=white, 255=fully saturated)
+/// - `v`: Value/Brightness (0-255)
+///
+/// # Returns
+/// RGB8 with values 0-255 for each channel
 fn hsv_to_rgb(h: u8, s: u8, v: u8) -> RGB8 {
     // Convert from u8 ranges to normal ranges
     let h_degrees = (h as f32 / 255.0) * 360.0;
@@ -141,6 +296,54 @@ fn hsv_to_rgb(h: u8, s: u8, v: u8) -> RGB8 {
     }
 }
 
+/// Convert color temperature (in mireds) to RGB.
+///
+/// # Parameters
+/// - `mireds`: Color temperature in mireds (reciprocal megakelvin)
+///   - Mireds = 1,000,000 / Kelvin
+///   - Typical range: 153 (6500K cool white) to 500 (2000K warm white)
+///   - Common values: 370 mireds ≈ 2700K (warm white), 250 mireds ≈ 4000K (neutral)
+///
+/// # Returns
+/// RGB8 approximating the color temperature
+///
+/// # Implementation Note
+/// This uses a simplified approximation suitable for basic warm/cool white mixing.
+/// For accurate color rendering, a proper blackbody radiation model or lookup table
+/// would be needed (Phase 3 improvement).
+fn color_temp_to_rgb(mireds: u16) -> RGB8 {
+    // Convert mireds to Kelvin
+    // Kelvin = 1,000,000 / mireds
+    // Clamp to reasonable range to avoid division by zero
+    let mireds = mireds.max(100).min(1000);
+    let kelvin = 1_000_000 / mireds as u32;
+
+    // Simplified approximation based on common temperature ranges:
+    // - Below 2700K (370+ mireds): Warm orange-white (candle-like)
+    // - 2700K-4000K (250-370 mireds): Warm to neutral white
+    // - 4000K-6500K (153-250 mireds): Neutral to cool white
+    // - Above 6500K (<153 mireds): Cool blue-white
+
+    let (r, g, b) = if kelvin < 2700 {
+        // Very warm (candle/sunset)
+        (255, 147, 41)
+    } else if kelvin < 3500 {
+        // Warm white (incandescent)
+        (255, 197, 143)
+    } else if kelvin < 5000 {
+        // Neutral white
+        (255, 228, 206)
+    } else if kelvin < 6500 {
+        // Cool white
+        (255, 243, 239)
+    } else {
+        // Very cool (daylight/overcast)
+        (201, 226, 255)
+    };
+
+    RGB8 { r, g, b }
+}
+
 impl color_control::ClusterHandler for LightController {
     const CLUSTER: rs_matter::dm::Cluster<'static> = Self::COLOR_CONTROL_CLUSTER;
 
@@ -152,29 +355,42 @@ impl color_control::ClusterHandler for LightController {
         self.notify_dataver_changed();
     }
 
+    /// Returns the current color mode (which color representation is active).
+    ///
+    /// Matter spec: ColorMode enum values
+    /// - 0 = CurrentHueAndCurrentSaturation
+    /// - 1 = CurrentXAndCurrentY
+    /// - 2 = ColorTemperature
     fn color_mode(
         &self,
-        ctx: impl rs_matter::dm::ReadContext,
+        _ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u8, rs_matter::error::Error> {
-        Ok(ColorMode::CurrentXAndCurrentY as _)
+        Ok(*self.color_mode_state.borrow() as u8)
     }
 
-    fn options(&self, ctx: impl rs_matter::dm::ReadContext) -> Result<u8, rs_matter::error::Error> {
-        Ok(1)
+    /// Returns the options bitmap configured via set_options command.
+    fn options(&self, _ctx: impl rs_matter::dm::ReadContext) -> Result<u8, rs_matter::error::Error> {
+        Ok(*self.options.borrow())
     }
 
+    /// Returns the number of color primaries (RGB = 3 primaries).
     fn number_of_primaries(
         &self,
-        ctx: impl rs_matter::dm::ReadContext,
+        _ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<rs_matter::tlv::Nullable<u8>, rs_matter::error::Error> {
-        Ok(Maybe::some(1))
+        // RGB LED has 3 primaries (red, green, blue)
+        Ok(Maybe::some(3))
     }
 
+    /// Returns the enhanced color mode (same as color_mode for this implementation).
+    ///
+    /// Enhanced color mode supports 16-bit hue in addition to standard modes.
     fn enhanced_color_mode(
         &self,
-        ctx: impl rs_matter::dm::ReadContext,
+        _ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u8, rs_matter::error::Error> {
-        Ok(ColorMode::CurrentXAndCurrentY as _)
+        // Enhanced mode is the same as standard mode
+        Ok(*self.color_mode_state.borrow() as u8)
     }
 
     fn color_capabilities(
@@ -184,22 +400,65 @@ impl color_control::ClusterHandler for LightController {
         Ok(color_control::ColorCapabilities::all().bits())
     }
 
+    /// Set the options bitmap for color control behavior.
+    ///
+    /// Matter spec: Options attribute (0x000F)
+    /// Bit 0: ExecuteIfOff - Execute commands even when light is off
+    ///
+    /// This controls how color commands behave when the light is off.
     fn set_options(
         &self,
-        ctx: impl rs_matter::dm::WriteContext,
+        _ctx: impl rs_matter::dm::WriteContext,
         value: u8,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("set_options: {value}");
-        todo!()
+        info!("set_options: {}", value);
+        *self.options.borrow_mut() = value;
+        self.notify_dataver_changed();
+        Ok(())
     }
 
+    /// Move to a specific hue value with direction control.
+    ///
+    /// Matter spec: MoveToHue command (0x00)
+    /// - Hue: 0-254 (circular color wheel, red=0, green=85, blue=170)
+    /// - Direction: Shortest/Longest distance, or Up/Down
+    /// - TransitionTime: 1/10th second units (currently ignored - instant change)
+    ///
+    /// # Transition Support
+    /// TODO: Transitions are not yet implemented (Phase 2b).
+    /// The hue changes instantly regardless of transition_time parameter.
     fn handle_move_to_hue(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveToHueRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move to hue {request:?}");
-        todo!()
+        let target_hue = request.hue()?;
+        let direction = request.direction()?;
+        let transition_time = request.transition_time().unwrap_or(0);
+
+        info!(
+            "MoveToHue: target={}, direction={:?}, transition_time={} (instant - transitions not implemented)",
+            target_hue, direction, transition_time
+        );
+
+        // Clamp hue to valid range (0-254)
+        let target_hue = target_hue.min(254);
+        let current_hue = *self.hue.borrow();
+
+        // Calculate the hue to set based on direction
+        // For now, we ignore direction and just set directly
+        // TODO: Implement direction logic for shortest/longest path
+        // Direction values: 0=ShortestDistance, 1=LongestDistance, 2=Up, 3=Down
+        let new_hue = target_hue;  // Simplified for now - proper direction logic in Phase 2b
+
+        // Update state
+        self.set_hue(new_hue);
+        self.set_color_mode(ColorMode::CurrentHueAndCurrentSaturation);
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!("Hue updated: {} -> {}", current_hue, new_hue);
+        Ok(())
     }
 
     fn handle_move_hue(
@@ -211,22 +470,93 @@ impl color_control::ClusterHandler for LightController {
         todo!()
     }
 
+    /// Increment or decrement hue by a step size.
+    ///
+    /// Matter spec: StepHue command (0x02)
+    /// - StepMode: Up (0) or Down (1)
+    /// - StepSize: Amount to change (0-254)
+    /// - TransitionTime: 1/10th second units (currently ignored - instant change)
+    ///
+    /// Hue wraps around circularly (0-254), so stepping up from 254 goes to 0.
+    ///
+    /// # Transition Support
+    /// TODO: Transitions are not yet implemented (Phase 2b).
+    /// The hue changes instantly regardless of transition_time parameter.
     fn handle_step_hue(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::StepHueRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("step hue {request:?}");
-        todo!()
+        let step_mode = request.step_mode()?;
+        let step_size = request.step_size()?;
+        let transition_time = request.transition_time().unwrap_or(0);
+
+        info!(
+            "StepHue: mode={:?}, step_size={}, transition_time={} (instant)",
+            step_mode, step_size, transition_time
+        );
+
+        let current_hue = *self.hue.borrow();
+
+        // Calculate new hue with wrapping (hue is circular 0-254)
+        // Check the enum variant by converting to u8 and checking value
+        // HueStepMode: Up=1, Down=3 (Matter spec)
+        let step_mode_value = step_mode as u8;
+        let new_hue = if step_mode_value == 1 {
+            // Up: Add and wrap around
+            ((current_hue as u16 + step_size as u16) % 255) as u8
+        } else {
+            // Down: Subtract with wrapping
+            if current_hue >= step_size {
+                current_hue - step_size
+            } else {
+                // Wrap around: 255 - (step_size - current_hue)
+                255 - (step_size - current_hue)
+            }
+        };
+
+        // Update state
+        self.set_hue(new_hue);
+        self.set_color_mode(ColorMode::CurrentHueAndCurrentSaturation);
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!("Hue stepped: {} -> {}", current_hue, new_hue);
+        Ok(())
     }
 
+    /// Move to a specific saturation value.
+    ///
+    /// Matter spec: MoveToSaturation command (0x03)
+    /// - Saturation: 0-254 (0=no color/white, 254=fully saturated)
+    /// - TransitionTime: 1/10th second units (currently ignored - instant change)
+    ///
+    /// # Transition Support
+    /// TODO: Transitions are not yet implemented (Phase 2b).
+    /// The saturation changes instantly regardless of transition_time parameter.
     fn handle_move_to_saturation(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveToSaturationRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move to sat {request:?}");
-        todo!()
+        let target_saturation = request.saturation()?;
+        let transition_time = request.transition_time().unwrap_or(0);
+
+        info!(
+            "MoveToSaturation: target={}, transition_time={} (instant - transitions not implemented)",
+            target_saturation, transition_time
+        );
+
+        let current_saturation = *self.saturation.borrow();
+
+        // Update state
+        self.set_saturation(target_saturation);
+        self.set_color_mode(ColorMode::CurrentHueAndCurrentSaturation);
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!("Saturation updated: {} -> {}", current_saturation, target_saturation);
+        Ok(())
     }
 
     fn handle_move_saturation(
@@ -238,13 +568,54 @@ impl color_control::ClusterHandler for LightController {
         todo!()
     }
 
+    /// Increment or decrement saturation by a step size.
+    ///
+    /// Matter spec: StepSaturation command (0x05)
+    /// - StepMode: Up (0) or Down (1)
+    /// - StepSize: Amount to change (0-254)
+    /// - TransitionTime: 1/10th second units (currently ignored - instant change)
+    ///
+    /// Unlike hue, saturation clamps at boundaries (doesn't wrap).
+    ///
+    /// # Transition Support
+    /// TODO: Transitions are not yet implemented (Phase 2b).
+    /// The saturation changes instantly regardless of transition_time parameter.
     fn handle_step_saturation(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::StepSaturationRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("set sat {request:?}");
-        todo!()
+        let step_mode = request.step_mode()?;
+        let step_size = request.step_size()?;
+        let transition_time = request.transition_time().unwrap_or(0);
+
+        info!(
+            "StepSaturation: mode={:?}, step_size={}, transition_time={} (instant)",
+            step_mode, step_size, transition_time
+        );
+
+        let current_saturation = *self.saturation.borrow();
+
+        // Calculate new saturation with clamping (0-254, no wrapping)
+        // Check the enum variant by converting to u8
+        // SaturationStepMode: Up=1, Down=3 (Matter spec)
+        let step_mode_value = step_mode as u8;
+        let new_saturation = if step_mode_value == 1 {
+            // Up: increase saturation
+            current_saturation.saturating_add(step_size).min(254)
+        } else {
+            // Down: decrease saturation
+            current_saturation.saturating_sub(step_size)
+        };
+
+        // Update state
+        self.set_saturation(new_saturation);
+        self.set_color_mode(ColorMode::CurrentHueAndCurrentSaturation);
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!("Saturation stepped: {} -> {}", current_saturation, new_saturation);
+        Ok(())
     }
 
     fn handle_move_to_hue_and_saturation(
@@ -295,13 +666,42 @@ impl color_control::ClusterHandler for LightController {
         todo!()
     }
 
+    /// Move to a specific color temperature.
+    ///
+    /// Matter spec: MoveToColorTemperature command (0x0A)
+    /// - ColorTemperatureMireds: Mireds (reciprocal megakelvin)
+    ///   - Mireds = 1,000,000 / Kelvin
+    ///   - Common range: 153-500 (6500K cool to 2000K warm)
+    /// - TransitionTime: 1/10th second units (currently ignored - instant change)
+    ///
+    /// # Transition Support
+    /// TODO: Transitions are not yet implemented (Phase 2b).
+    /// The color temperature changes instantly regardless of transition_time parameter.
     fn handle_move_to_color_temperature(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveToColorTemperatureRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move to temp {request:?}");
-        todo!()
+        let target_mireds = request.color_temperature_mireds()?;
+        let transition_time = request.transition_time().unwrap_or(0);
+
+        info!(
+            "MoveToColorTemperature: target={} mireds ({} K), transition_time={} (instant - transitions not implemented)",
+            target_mireds,
+            1_000_000 / target_mireds.max(100) as u32,
+            transition_time
+        );
+
+        let current_mireds = *self.color_temperature_mireds.borrow();
+
+        // Update state
+        *self.color_temperature_mireds.borrow_mut() = target_mireds;
+        self.set_color_mode(ColorMode::ColorTemperature);
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!("Color temperature updated: {} -> {} mireds", current_mireds, target_mireds);
+        Ok(())
     }
 
     fn handle_enhanced_move_to_hue(
@@ -367,13 +767,65 @@ impl color_control::ClusterHandler for LightController {
         todo!()
     }
 
+    /// Increment or decrement color temperature by a step size.
+    ///
+    /// Matter spec: StepColorTemperature command (0x4C)
+    /// - StepMode: Up (0) or Down (1)
+    /// - StepSize: Amount to change in mireds
+    /// - TransitionTime: 1/10th second units (currently ignored - instant change)
+    /// - ColorTemperatureMinimumMireds: Lower bound (optional)
+    /// - ColorTemperatureMaximumMireds: Upper bound (optional)
+    ///
+    /// Color temperature clamps at boundaries (doesn't wrap).
+    ///
+    /// # Transition Support
+    /// TODO: Transitions are not yet implemented (Phase 2b).
+    /// The color temperature changes instantly regardless of transition_time parameter.
     fn handle_step_color_temperature(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::StepColorTemperatureRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("step temp {request:?}");
-        todo!()
+        let step_mode = request.step_mode()?;
+        let step_size = request.step_size()?;
+        let transition_time = request.transition_time().unwrap_or(0);
+
+        // Optional min/max bounds from request
+        let min_mireds = request.color_temperature_minimum_mireds().unwrap_or(100);
+        let max_mireds = request.color_temperature_maximum_mireds().unwrap_or(1000);
+
+        info!(
+            "StepColorTemperature: mode={:?}, step_size={}, transition_time={} (instant), bounds=[{}, {}]",
+            step_mode, step_size, transition_time, min_mireds, max_mireds
+        );
+
+        let current_mireds = *self.color_temperature_mireds.borrow();
+
+        // Calculate new temperature with clamping
+        // Check the enum variant by converting to u8
+        // HueStepMode: Up=1, Down=3 (Matter spec - reused for color temp)
+        let step_mode_value = step_mode as u8;
+        let new_mireds = if step_mode_value == 1 {
+            // Up means warmer (higher mireds, lower Kelvin)
+            current_mireds.saturating_add(step_size).min(max_mireds)
+        } else {
+            // Down means cooler (lower mireds, higher Kelvin)
+            current_mireds.saturating_sub(step_size).max(min_mireds)
+        };
+
+        // Update state
+        *self.color_temperature_mireds.borrow_mut() = new_mireds;
+        self.set_color_mode(ColorMode::ColorTemperature);
+        self.update_led();
+        self.notify_dataver_changed();
+
+        info!(
+            "Color temperature stepped: {} -> {} mireds ({} -> {} K)",
+            current_mireds, new_mireds,
+            1_000_000 / current_mireds.max(100) as u32,
+            1_000_000 / new_mireds.max(100) as u32
+        );
+        Ok(())
     }
 }
 

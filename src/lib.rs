@@ -16,6 +16,7 @@ use crate::color_control::{ColorMode, CommandId, Feature};
 use smart_leds::{SmartLedsWrite as _, RGB8};
 
 pub mod color_control;
+pub mod credentials;
 pub mod nvs;
 
 #[macro_export]

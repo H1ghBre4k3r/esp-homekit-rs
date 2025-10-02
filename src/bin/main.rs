@@ -27,6 +27,7 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 
 use esp_hal_smartled::{smart_led_buffer, SmartLedsAdapter};
+use esp_homekit::credentials::credentials;
 use esp_homekit::nvs::get_persistent_store;
 use esp_homekit::{color_control, mk_static, LightController};
 use log::info;
@@ -34,7 +35,6 @@ use log::info;
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::devices::test::{TEST_PID, TEST_VID};
 use rs_matter::dm::DeviceType;
-use rs_matter::BasicCommData;
 use rs_matter_embassy::epoch::epoch;
 use rs_matter_embassy::matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter_embassy::matter::dm::clusters::on_off::{self};
@@ -66,11 +66,6 @@ const DEVICE_CONFIG: BasicInfoConfig = BasicInfoConfig {
     vendor_name: "PescaDev",
     device_name: "ESP32 Smart Light",
     ..BasicInfoConfig::new()
-};
-
-const DEVICE_COMM: BasicCommData = BasicCommData {
-    password: 20202020,
-    discriminator: 3840,
 };
 
 #[esp_hal_embassy::main]
@@ -114,7 +109,7 @@ async fn main(_s: Spawner) {
         EmbassyWifiMatterStack<'_, BUMP_SIZE, ()>,
         EmbassyWifiMatterStack::<BUMP_SIZE, ()>::new(
             &DEVICE_CONFIG,
-            DEVICE_COMM,
+            credentials(),
             &TEST_DEV_ATT,
             epoch,
             esp_rand,

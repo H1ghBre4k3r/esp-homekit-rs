@@ -33,15 +33,16 @@ impl Default for Nvs {
             [u8; partitions::PARTITION_TABLE_MAX_LEN],
             [0u8; partitions::PARTITION_TABLE_MAX_LEN]
         );
-        let pt = partitions::read_partition_table(flash, pt_mem).unwrap();
+        let pt = partitions::read_partition_table(flash, pt_mem)
+            .expect("Failed to read partition table - flash hardware issue or corrupted partition table");
 
         let nvs = mk_static!(
             PartitionEntry<'_>,
             pt.find_partition(partitions::PartitionType::Data(
                 partitions::DataPartitionSubType::Nvs,
             ))
-            .unwrap()
-            .unwrap()
+            .expect("Failed to find NVS partition in partition table")
+            .expect("NVS partition type exists but entry is None - partition table corrupted")
         );
         let region = nvs.as_embedded_storage(flash);
         info!("NVS partition size = {}\n", region.capacity());

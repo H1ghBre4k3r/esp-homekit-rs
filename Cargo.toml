@@ -77,7 +77,13 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 static_cell = "2.1.1"
 trouble-host = { version = "0.1.0", features = ["gatt"] }
 
-rs-matter-embassy = { git = "https://github.com/H1ghBre4k3r/rs-matter-embassy.git", rev = "3b72347204c460f861d0e6b6a2bf16cf23ea14a1", features = [
+# rs-matter-embassy = { path = "../rs-matter-embassy/", features = [
+#   "esp",
+#   "log",
+#   "embassy-net",
+# ] }
+
+rs-matter-embassy = { git = "https://github.com/H1ghBre4k3r/rs-matter-embassy.git", rev = "5099a13c8a0b51d88604a8ea185da2664320a59b", features = [
   "esp",
   "log",
   "embassy-net",

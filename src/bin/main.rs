@@ -27,7 +27,7 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 
 use esp_hal_smartled::{smart_led_buffer, SmartLedsAdapter};
-use esp_homekit::nvs::Nvs;
+use esp_homekit::nvs::get_persistent_store;
 use esp_homekit::{color_control, mk_static, LightController};
 use log::info;
 
@@ -45,7 +45,7 @@ use rs_matter_embassy::wireless::{EmbassyWifi, EmbassyWifiMatterStack};
 
 extern crate alloc;
 
-const BUMP_SIZE: usize = 15_500;
+const BUMP_SIZE: usize = 20_000;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -133,7 +133,8 @@ async fn main(_s: Spawner) {
     // Using `pin!` is completely optional, but saves some memory due to `rustc`
     // not being very intelligent w.r.t. stack usage in async functions
     // This step can be repeated in that the stack can be stopped and started multiple times, as needed.
-    let store = stack.create_shared_store(Nvs::new());
+    // let store = stack.create_shared_store(Nvs::new());
+    let store = stack.create_shared_store(get_persistent_store());
     let mut matter = pin!(stack.run_coex(
         // The Matter stack needs to instantiate an `embassy-net` `Driver` and `Controller`
         EmbassyWifi::new(

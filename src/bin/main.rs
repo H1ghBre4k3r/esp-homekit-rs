@@ -80,6 +80,10 @@ async fn main(_s: Spawner) {
 
     esp_hal_embassy::init(esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER).alarm0);
 
+    // Give BLE controller time to stabilize before Matter stack initialization
+    // Fixes intermittent "BleHost(Hci(Invalid HCI Command Parameters))" errors
+    Timer::after(Duration::from_millis(100)).await;
+
     // == Step 2: ==
     // Allocate the Matter stack.
     // For MCUs, it is best to allocate it statically, so as to avoid program stack blowups (its memory footprint is ~ 35 to 50KB).

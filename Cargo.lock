@@ -2860,6 +2860,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-embassy"
 version = "0.1.0"
+source = "git+https://github.com/H1ghBre4k3r/rs-matter-embassy.git?rev=5099a13c8a0b51d88604a8ea185da2664320a59b#5099a13c8a0b51d88604a8ea185da2664320a59b"
 dependencies = [
  "bt-hci 0.3.2",
  "cyw43",

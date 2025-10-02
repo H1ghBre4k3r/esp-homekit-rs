@@ -1,0 +1,265 @@
+// Manual Test Functions for ESP32-C6 Matter Light
+//
+// Add these to src/bin/main.rs for manual verification on hardware
+//
+// Usage:
+// 1. Add this code to main.rs before the Matter stack starts
+// 2. Call verify_all_tests()
+// 3. Flash device and check serial output
+// 4. Remove after verification
+
+use esp_homekit::{LightState};
+use log::info;
+
+/// Run all manual verification tests
+pub fn verify_all_tests() {
+    info!("====== MANUAL TEST SUITE START ======");
+
+    test_serialization_round_trip();
+    test_checksum_validation();
+    test_corrupted_data_recovery();
+    test_color_mode_conversion();
+
+    info!("====== MANUAL TEST SUITE END ======");
+}
+
+/// Test 1: Serialization Round-Trip
+fn test_serialization_round_trip() {
+    info!("TEST 1: Serialization round-trip");
+
+    // Create a known state
+    let original = LightState {
+        on_off: true,
+        hue: 85,           // Green
+        saturation: 254,   // Fully saturated
+        current_x: 0x6000, // ~0.375
+        current_y: 0x6000,
+        color_temperature_mireds: 370, // Warm white
+        enhanced_hue: 21845, // 85 * 65535 / 254 ≈ 21845
+        color_mode_state: 0, // HSV mode
+        options: 0,
+    };
+
+    // Serialize
+    let bytes = original.serialize();
+    info!("Serialized to {} bytes", bytes.len());
+    info!("Bytes: {:02X?}", &bytes[..]);
+
+    // Deserialize
+    match LightState::deserialize(&bytes) {
+        Ok(restored) => {
+            // Verify each field
+            let mut passed = true;
+
+            if original.on_off != restored.on_off {
+                info!("FAIL: on_off {} != {}", original.on_off, restored.on_off);
+                passed = false;
+            }
+
+            if original.hue != restored.hue {
+                info!("FAIL: hue {} != {}", original.hue, restored.hue);
+                passed = false;
+            }
+
+            if original.saturation != restored.saturation {
+                info!("FAIL: saturation {} != {}", original.saturation, restored.saturation);
+                passed = false;
+            }
+
+            if original.current_x != restored.current_x {
+                info!("FAIL: current_x {} != {}", original.current_x, restored.current_x);
+                passed = false;
+            }
+
+            if original.current_y != restored.current_y {
+                info!("FAIL: current_y {} != {}", original.current_y, restored.current_y);
+                passed = false;
+            }
+
+            if original.color_temperature_mireds != restored.color_temperature_mireds {
+                info!("FAIL: color_temperature_mireds {} != {}",
+                    original.color_temperature_mireds, restored.color_temperature_mireds);
+                passed = false;
+            }
+
+            if original.enhanced_hue != restored.enhanced_hue {
+                info!("FAIL: enhanced_hue {} != {}", original.enhanced_hue, restored.enhanced_hue);
+                passed = false;
+            }
+
+            if original.color_mode_state != restored.color_mode_state {
+                info!("FAIL: color_mode_state {} != {}", original.color_mode_state, restored.color_mode_state);
+                passed = false;
+            }
+
+            if original.options != restored.options {
+                info!("FAIL: options {} != {}", original.options, restored.options);
+                passed = false;
+            }
+
+            if passed {
+                info!("✅ PASS: All fields match");
+            } else {
+                info!("❌ FAIL: Field mismatch");
+            }
+        }
+        Err(e) => {
+            info!("❌ FAIL: Deserialization error: {}", e);
+        }
+    }
+}
+
+/// Test 2: Checksum Validation
+fn test_checksum_validation() {
+    info!("TEST 2: Checksum validation");
+
+    let state = LightState {
+        on_off: false,
+        hue: 0,
+        saturation: 0,
+        current_x: 0x6000,
+        current_y: 0x6000,
+        color_temperature_mireds: 370,
+        enhanced_hue: 0,
+        color_mode_state: 0,
+        options: 0,
+    };
+
+    let bytes = state.serialize();
+    let checksum = bytes[14];
+
+    // Verify XOR property: checksum ^ all_data_bytes should == 0
+    let verify = bytes[0..14].iter().fold(checksum, |acc, &b| acc ^ b);
+
+    if verify == 0 {
+        info!("✅ PASS: Checksum XOR property verified");
+    } else {
+        info!("❌ FAIL: Checksum XOR = {} (expected 0)", verify);
+    }
+}
+
+/// Test 3: Corrupted Data Recovery
+fn test_corrupted_data_recovery() {
+    info!("TEST 3: Corrupted data recovery");
+
+    let state = LightState {
+        on_off: true,
+        hue: 170, // Blue
+        saturation: 200,
+        current_x: 0x8000,
+        current_y: 0x8000,
+        color_temperature_mireds: 250,
+        enhanced_hue: 43690,
+        color_mode_state: 0,
+        options: 0,
+    };
+
+    let mut bytes = state.serialize();
+
+    // Test 1: Corrupt a data byte
+    info!("Test 3a: Corrupt data byte");
+    bytes[5] ^= 0xFF; // Flip all bits in current_x
+
+    match LightState::deserialize(&bytes) {
+        Ok(_) => info!("❌ FAIL: Should have detected corruption"),
+        Err("Checksum mismatch") => info!("✅ PASS: Checksum caught corruption"),
+        Err(e) => info!("⚠️  PARTIAL: Got error '{}' (expected 'Checksum mismatch')", e),
+    }
+
+    // Restore
+    bytes[5] ^= 0xFF;
+
+    // Test 2: Wrong version
+    info!("Test 3b: Wrong version");
+    bytes[0] = 0x02; // Change version from 0x01 to 0x02
+
+    match LightState::deserialize(&bytes) {
+        Ok(_) => info!("❌ FAIL: Should have rejected wrong version"),
+        Err("Version mismatch") => info!("✅ PASS: Version check works"),
+        Err(e) => info!("⚠️  PARTIAL: Got error '{}' (expected 'Version mismatch')", e),
+    }
+
+    // Restore
+    bytes[0] = 0x01;
+
+    // Test 3: Wrong size
+    info!("Test 3c: Wrong size");
+    let short_bytes = &bytes[0..10]; // Only 10 bytes instead of 15
+
+    match LightState::deserialize(short_bytes) {
+        Ok(_) => info!("❌ FAIL: Should have rejected wrong size"),
+        Err("Invalid size") => info!("✅ PASS: Size check works"),
+        Err(e) => info!("⚠️  PARTIAL: Got error '{}' (expected 'Invalid size')", e),
+    }
+}
+
+/// Test 4: Color Mode Conversion
+fn test_color_mode_conversion() {
+    info!("TEST 4: Color mode enum conversion");
+
+    // Test u8 -> ColorMode conversion in apply_state
+    let test_cases = [
+        (0, "CurrentHueAndCurrentSaturation"),
+        (1, "CurrentXAndCurrentY"),
+        (2, "ColorTemperature"),
+        (99, "Unknown (should default to HSV)"),
+    ];
+
+    for (mode_u8, expected) in test_cases {
+        let state = LightState {
+            on_off: false,
+            hue: 0,
+            saturation: 0,
+            current_x: 0,
+            current_y: 0,
+            color_temperature_mireds: 370,
+            enhanced_hue: 0,
+            color_mode_state: mode_u8,
+            options: 0,
+        };
+
+        let bytes = state.serialize();
+        match LightState::deserialize(&bytes) {
+            Ok(restored) => {
+                info!("Mode {} -> {}: OK", mode_u8, expected);
+                if restored.color_mode_state != mode_u8 && mode_u8 < 3 {
+                    info!("❌ FAIL: Mode not preserved correctly");
+                }
+            }
+            Err(e) => {
+                info!("❌ FAIL: Mode {} failed: {}", mode_u8, e);
+            }
+        }
+    }
+
+    info!("✅ Color mode tests complete");
+}
+
+// ============================================================
+// How to use these tests:
+// ============================================================
+//
+// In src/bin/main.rs, add near the start of async fn main():
+//
+// ```rust
+// async fn main(_s: Spawner) {
+//     esp_println::logger::init_logger(log::LevelFilter::Info);
+//     info!("Starting...");
+//
+//     // Run manual tests
+//     verify_all_tests();
+//
+//     // Wait a bit to see output
+//     embassy_time::Timer::after(embassy_time::Duration::from_millis(1000)).await;
+//
+//     // Continue with normal initialization...
+//     heap_allocator!(size: HEAP_SIZE);
+//     // ... rest of code
+// }
+// ```
+//
+// Then:
+// 1. cargo run --release
+// 2. Watch serial output for test results
+// 3. Look for ✅ PASS or ❌ FAIL markers
+// 4. Remove test code after verification

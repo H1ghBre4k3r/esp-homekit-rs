@@ -28,7 +28,9 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal_smartled::{smart_led_buffer, SmartLedsAdapter};
 use esp_homekit::credentials::credentials;
 use esp_homekit::nvs::get_persistent_store;
-use esp_homekit::{color_control, identify, level_control, mk_static, LightController, LED_COUNT, LED_SIZE};
+use esp_homekit::{
+    color_control, identify, level_control, mk_static, LightController, LED_COUNT, LED_SIZE,
+};
 use log::{error, info};
 
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
@@ -43,7 +45,7 @@ use rs_matter_embassy::matter::{clusters, devices};
 use rs_matter_embassy::rand::esp::{esp_init_rand, esp_rand};
 use rs_matter_embassy::wireless::esp::EspWifiDriver;
 use rs_matter_embassy::wireless::{EmbassyWifi, EmbassyWifiMatterStack};
-use smart_leds::RGBA;
+use smart_leds::{SmartLedsWrite as _, RGB8, RGBA};
 
 extern crate alloc;
 
@@ -66,6 +68,18 @@ const DEVICE_CONFIG: BasicInfoConfig = BasicInfoConfig {
     device_name: "ESP32 Smart Light",
     ..BasicInfoConfig::new()
 };
+//
+// #[embassy_executor::task]
+// async fn blinky(onboard: SmartLedsAdapter<ConstChannelAccess<Tx, 1>, 25>) {
+//
+// }
+
+async fn blink(led: &mut SmartLedsAdapter<ConstChannelAccess<Tx, 1>, 25>, r: u8, g: u8, b: u8) {
+    led.write([RGB8 { r, g, b }]).unwrap();
+    Timer::after(Duration::from_millis(1000)).await;
+    led.write([RGB8 { r: 0, g: 0, b: 0 }]).unwrap();
+    Timer::after(Duration::from_millis(1000)).await;
+}
 
 #[esp_hal_embassy::main]
 async fn main(_s: Spawner) {
@@ -82,6 +96,20 @@ async fn main(_s: Spawner) {
     // Necessary `esp-hal` and `esp-wifi` initialization boilerplate
     let peripherals = esp_hal::init(esp_hal::Config::default());
     let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
+    let mut onboard: SmartLedsAdapter<ConstChannelAccess<Tx, 1>, 25> = SmartLedsAdapter::new(
+        rmt.channel1,
+        peripherals.GPIO8,
+        smart_led_buffer!(LED_COUNT),
+    );
+    const LEVEL: u8 = 10;
+    onboard
+        .write([RGB8 {
+            r: LEVEL,
+            g: LEVEL,
+            b: LEVEL,
+        }])
+        .unwrap();
+
     let led: SmartLedsAdapter<ConstChannelAccess<Tx, 0>, LED_SIZE, RGBA<u8>> =
         SmartLedsAdapter::new_with_color(
             rmt.channel0,
@@ -99,6 +127,10 @@ async fn main(_s: Spawner) {
     let init = esp_wifi::init(timg0.timer0, rng).unwrap();
 
     esp_hal_embassy::init(esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER).alarm0);
+
+    Timer::after(Duration::from_millis(1000)).await;
+
+    blink(&mut onboard, LEVEL, 0, 0).await;
 
     // Give BLE controller time to stabilize before Matter stack initialization
     // Fixes intermittent "BleHost(Hci(Invalid HCI Command Parameters))" errors
@@ -119,6 +151,8 @@ async fn main(_s: Spawner) {
         )
     );
 
+    blink(&mut onboard, 0, LEVEL, 0).await;
+
     let light_controller = mk_static!(
         LightController,
         LightController::new(Dataver::new_rand(stack.matter().rand()), led)
@@ -127,6 +161,8 @@ async fn main(_s: Spawner) {
     let level_control_handler = level_control::HandlerAdaptor(&*light_controller);
     let on_off_handler = on_off::HandlerAdaptor(&*light_controller);
     let identify_handler = identify::HandlerAdaptor(&*light_controller);
+
+    blink(&mut onboard, 0, LEVEL, 0).await;
 
     // Spawn transition task for smooth color/brightness changes
     _s.spawn(esp_homekit::transition_task(light_controller))
@@ -176,6 +212,8 @@ async fn main(_s: Spawner) {
             Async(desc::DescHandler::new(Dataver::new_rand(stack.matter().rand())).adapt()),
         );
 
+    blink(&mut onboard, 0, 0, LEVEL).await;
+
     // == Step 4: ==
 
     // Run the Matter stack with our handler
@@ -184,6 +222,7 @@ async fn main(_s: Spawner) {
     // This step can be repeated in that the stack can be stopped and started multiple times, as needed.
     // let store = stack.create_shared_store(Nvs::new());
     let store = stack.create_shared_store(get_persistent_store());
+    blink(&mut onboard, 0, 0, LEVEL).await;
     stack
         .run_coex(
             // The Matter stack needs to instantiate an `embassy-net` `Driver` and `Controller`

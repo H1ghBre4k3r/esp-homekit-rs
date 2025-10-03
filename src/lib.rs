@@ -13,7 +13,7 @@ use rs_matter::{
 };
 
 use crate::color_control::{ColorMode, CommandId, Feature};
-use smart_leds::{SmartLedsWrite as _, RGB8};
+use smart_leds::{SmartLedsWrite as _, RGB8, RGBA};
 
 pub mod color_control;
 pub mod credentials;
@@ -29,7 +29,11 @@ macro_rules! mk_static {
     }};
 }
 
-type Led = SmartLedsAdapter<ConstChannelAccess<Tx, 0>, 25>;
+pub const LED_COUNT: usize = 1;
+
+pub const LED_SIZE: usize = 1 + LED_COUNT * 32;
+
+type Led = SmartLedsAdapter<ConstChannelAccess<Tx, 0>, LED_SIZE, RGBA<u8>>;
 
 pub struct LightController {
     dataver: Dataver,
@@ -85,9 +89,25 @@ impl LightController {
             let sat = *self.saturation.borrow();
             let RGB8 { r, g, b } = hsv_to_rgb(hue, sat, 100);
             // Note: LED has swapped R and G channels
-            led.write([RGB8 { r: g, g: r, b }]).unwrap();
+            led.write(
+                [RGBA {
+                    r: g,
+                    g: r,
+                    b,
+                    a: 0,
+                }; LED_COUNT],
+            )
+            .unwrap();
         } else {
-            led.write([RGB8 { r: 0, g: 0, b: 0 }]).unwrap();
+            led.write(
+                [RGBA {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 0,
+                }; LED_COUNT],
+            )
+            .unwrap();
         }
     }
 

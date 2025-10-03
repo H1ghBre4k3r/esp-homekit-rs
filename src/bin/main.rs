@@ -29,7 +29,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal_smartled::{smart_led_buffer, SmartLedsAdapter};
 use esp_homekit::credentials::credentials;
 use esp_homekit::nvs::get_persistent_store;
-use esp_homekit::{color_control, mk_static, LightController};
+use esp_homekit::{color_control, mk_static, LightController, LED_COUNT, LED_SIZE};
 use log::info;
 
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
@@ -45,6 +45,7 @@ use rs_matter_embassy::matter::{clusters, devices};
 use rs_matter_embassy::rand::esp::{esp_init_rand, esp_rand};
 use rs_matter_embassy::wireless::esp::EspWifiDriver;
 use rs_matter_embassy::wireless::{EmbassyWifi, EmbassyWifiMatterStack};
+use smart_leds::RGBA;
 
 extern crate alloc;
 
@@ -83,8 +84,12 @@ async fn main(_s: Spawner) {
     // Necessary `esp-hal` and `esp-wifi` initialization boilerplate
     let peripherals = esp_hal::init(esp_hal::Config::default());
     let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
-    let led: SmartLedsAdapter<ConstChannelAccess<Tx, 0>, 25> =
-        SmartLedsAdapter::new(rmt.channel0, peripherals.GPIO8, smart_led_buffer!(1));
+    let led: SmartLedsAdapter<ConstChannelAccess<Tx, 0>, LED_SIZE, RGBA<u8>> =
+        SmartLedsAdapter::new_with_color(
+            rmt.channel0,
+            peripherals.GPIO10,
+            smart_led_buffer!(LED_COUNT; RGBW),
+        );
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let rng = esp_hal::rng::Rng::new(peripherals.RNG);

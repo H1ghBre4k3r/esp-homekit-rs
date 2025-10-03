@@ -45,6 +45,10 @@ pub struct LightController {
     saturation: RefCell<u8>,
     // LevelControl cluster state
     current_level: RefCell<u8>, // 0-254 (1=minimum light, 254=maximum)
+    // ColorControl XY mode state
+    current_x: RefCell<u16>, // 0-65535 (0.0-1.0)
+    current_y: RefCell<u16>, // 0-65535 (0.0-1.0)
+    color_mode: RefCell<u8>, // 0=HS, 1=XY, 2=CT
 }
 
 impl LightController {
@@ -85,6 +89,9 @@ impl LightController {
             hue: RefCell::new(0),
             saturation: RefCell::new(0),
             current_level: RefCell::new(254), // Start at maximum brightness
+            current_x: RefCell::new(0),       // Start at x=0.0
+            current_y: RefCell::new(0),       // Start at y=0.0
+            color_mode: RefCell::new(0),      // Start in HS mode
         }
     }
 
@@ -93,15 +100,31 @@ impl LightController {
         let mut led = self.led.borrow_mut();
 
         if on {
-            let hue = *self.hue.borrow();
-            let sat = *self.saturation.borrow();
             let level = *self.current_level.borrow();
+            let mode = *self.color_mode.borrow();
 
-            // Convert level (0-254) to value (0-100) for HSV
-            // Use saturating math to avoid overflow
-            let value = ((level as u16 * 100) / 254) as u8;
+            let RGB8 { r, g, b } = match mode {
+                // Mode 0: Hue and Saturation
+                0 => {
+                    let hue = *self.hue.borrow();
+                    let sat = *self.saturation.borrow();
+                    // Convert level (0-254) to value (0-100) for HSV
+                    let value = ((level as u16 * 100) / 254) as u8;
+                    hsv_to_rgb(hue, sat, value)
+                }
+                // Mode 1: XY
+                1 => {
+                    let x = *self.current_x.borrow();
+                    let y = *self.current_y.borrow();
+                    xy_to_rgb(x, y, level)
+                }
+                // Mode 2: Color Temperature (not implemented yet)
+                _ => {
+                    // Default to black if unknown mode
+                    RGB8 { r: 0, g: 0, b: 0 }
+                }
+            };
 
-            let RGB8 { r, g, b } = hsv_to_rgb(hue, sat, value);
             // Note: LED has swapped R and G channels
             led.write(
                 [RGBA {
@@ -172,6 +195,89 @@ fn hsv_to_rgb(h: u8, s: u8, v: u8) -> RGB8 {
     }
 }
 
+/// Convert CIE 1931 XY coordinates to RGB
+fn xy_to_rgb(x: u16, y: u16, brightness: u8) -> RGB8 {
+    // Convert u16 (0-65535) to float (0.0-1.0)
+    let x_norm = x as f32 / 65535.0;
+    let y_norm = y as f32 / 65535.0;
+
+    // Handle edge case: y = 0 would cause division by zero
+    if y_norm < 0.0001 {
+        return RGB8 { r: 0, g: 0, b: 0 };
+    }
+
+    // Convert XY to XYZ color space
+    let z = 1.0 - x_norm - y_norm;
+    let y = brightness as f32 / 254.0; // Normalized brightness
+    let x = (y / y_norm) * x_norm;
+    let z = (y / y_norm) * z;
+
+    // Apply XYZ to sRGB matrix (D65 illuminant)
+    let r_linear = x * 3.2406 + y * -1.5372 + z * -0.4986;
+    let g_linear = x * -0.9689 + y * 1.8758 + z * 0.0415;
+    let b_linear = x * 0.0557 + y * -0.2040 + z * 1.0570;
+
+    // Apply sRGB gamma correction
+    // TODO: Proper gamma correction requires powf which needs libm crate
+    // For now, use linear RGB (will look slightly washed out but functional)
+    let r_gamma = r_linear;
+    let g_gamma = g_linear;
+    let b_gamma = b_linear;
+
+    // Clamp to valid range and convert to u8
+    let clamp = |c: f32| -> u8 {
+        if c < 0.0 {
+            0
+        } else if c > 1.0 {
+            255
+        } else {
+            (c * 255.0) as u8
+        }
+    };
+
+    RGB8 {
+        r: clamp(r_gamma),
+        g: clamp(g_gamma),
+        b: clamp(b_gamma),
+    }
+}
+
+/// Convert RGB to CIE 1931 XY coordinates
+fn rgb_to_xy(r: u8, g: u8, b: u8) -> (u16, u16) {
+    // Normalize RGB to 0.0-1.0
+    let r_norm = r as f32 / 255.0;
+    let g_norm = g as f32 / 255.0;
+    let b_norm = b as f32 / 255.0;
+
+    // Reverse gamma correction (sRGB to linear)
+    // TODO: Proper gamma expansion requires powf which needs libm crate
+    // For now, use linear RGB
+    let r_linear = r_norm;
+    let g_linear = g_norm;
+    let b_linear = b_norm;
+
+    // Apply sRGB to XYZ matrix (D65 illuminant)
+    let x = r_linear * 0.4124 + g_linear * 0.3576 + b_linear * 0.1805;
+    let y = r_linear * 0.2126 + g_linear * 0.7152 + b_linear * 0.0722;
+    let z = r_linear * 0.0193 + g_linear * 0.1192 + b_linear * 0.9505;
+
+    // Convert XYZ to xy chromaticity coordinates
+    let sum = x + y + z;
+    if sum < 0.0001 {
+        // Black or very dark - return default point
+        return (0, 0);
+    }
+
+    let x = x / sum;
+    let y = y / sum;
+
+    // Convert to u16 (0-65535)
+    let x_u16 = (x * 65535.0).clamp(0.0, 65535.0) as u16;
+    let y_u16 = (y * 65535.0).clamp(0.0, 65535.0) as u16;
+
+    (x_u16, y_u16)
+}
+
 impl color_control::ClusterHandler for LightController {
     const CLUSTER: rs_matter::dm::Cluster<'static> = Self::COLOR_CONTROL_CLUSTER;
 
@@ -185,9 +291,9 @@ impl color_control::ClusterHandler for LightController {
 
     fn color_mode(
         &self,
-        ctx: impl rs_matter::dm::ReadContext,
+        _ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u8, rs_matter::error::Error> {
-        Ok(ColorMode::CurrentXAndCurrentY as _)
+        Ok(*self.color_mode.borrow())
     }
 
     fn options(&self, ctx: impl rs_matter::dm::ReadContext) -> Result<u8, rs_matter::error::Error> {
@@ -203,9 +309,9 @@ impl color_control::ClusterHandler for LightController {
 
     fn enhanced_color_mode(
         &self,
-        ctx: impl rs_matter::dm::ReadContext,
+        _ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u8, rs_matter::error::Error> {
-        Ok(ColorMode::CurrentXAndCurrentY as _)
+        Ok(*self.color_mode.borrow())
     }
 
     fn color_capabilities(
@@ -213,6 +319,20 @@ impl color_control::ClusterHandler for LightController {
         ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u16, rs_matter::error::Error> {
         Ok(color_control::ColorCapabilities::all().bits())
+    }
+
+    fn current_x(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(*self.current_x.borrow())
+    }
+
+    fn current_y(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(*self.current_y.borrow())
     }
 
     fn set_options(
@@ -280,7 +400,7 @@ impl color_control::ClusterHandler for LightController {
 
     fn handle_move_to_hue_and_saturation(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveToHueAndSaturationRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
         info!("move to hue sat {request:?}");
@@ -294,6 +414,18 @@ impl color_control::ClusterHandler for LightController {
 
         *self.hue.borrow_mut() = hue;
         *self.saturation.borrow_mut() = saturation;
+
+        // Switch to HS color mode
+        *self.color_mode.borrow_mut() = ColorMode::CurrentHueAndCurrentSaturation as u8;
+
+        // Sync XY values by converting current HSV to RGB then to XY
+        let level = *self.current_level.borrow();
+        let value = ((level as u16 * 100) / 254) as u8;
+        let RGB8 { r, g, b } = hsv_to_rgb(hue, saturation, value);
+        let (x, y) = rgb_to_xy(r, g, b);
+        *self.current_x.borrow_mut() = x;
+        *self.current_y.borrow_mut() = y;
+
         self.update_led();
         self.notify_dataver_changed();
         Ok(())
@@ -301,11 +433,25 @@ impl color_control::ClusterHandler for LightController {
 
     fn handle_move_to_color(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveToColorRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move to color {request:?}");
-        todo!()
+        let x = request.color_x()?;
+        let y = request.color_y()?;
+        info!("move to color x={}, y={}", x, y);
+
+        // Update XY coordinates
+        *self.current_x.borrow_mut() = x;
+        *self.current_y.borrow_mut() = y;
+
+        // Switch to XY color mode
+        *self.color_mode.borrow_mut() = ColorMode::CurrentXAndCurrentY as u8;
+
+        // Update LED
+        self.update_led();
+        self.notify_dataver_changed();
+
+        Ok(())
     }
 
     fn handle_move_color(

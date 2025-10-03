@@ -13,13 +13,10 @@ This roadmap outlines the implementation plan to achieve Matter 1.2 specificatio
 ## Progress Overview
 
 - [x] **Phase 0:** Foundation & Corrections (1 task) ✅ **COMPLETED**
-- [ ] **Phase 1:** Required Clusters - Basic (4 tasks) - 1/4 completed
-- [ ] **Phase 2:** LevelControl Cluster (1 task)
-- [ ] **Phase 3:** ColorControl - XY Mode (1 task)
-- [ ] **Phase 4:** ColorControl - Color Temperature (1 task)
-- [ ] **Phase 5:** ColorControl - Transitions & Animations (1 task)
-- [ ] **Phase 6:** State Persistence (1 task)
-- [ ] **Phase 7:** Testing & Validation (1 task)
+- [ ] **Phase 1:** Required Clusters - Basic (4 tasks) - 1/4 completed (LevelControl)
+- [ ] **Phase 2:** ColorControl Enhancements (3 tasks) - 1/3 completed (XY Mode ✅)
+- [ ] **Phase 3:** State Persistence (1 task)
+- [ ] **Phase 4:** Testing & Validation (1 task)
 
 **Total Tasks:** 11 major implementation tasks
 
@@ -263,7 +260,7 @@ drev: 2  // Matter 1.2 uses revision 2+
 ## Phase 2: ColorControl Enhancements
 
 ### Task 2.1: Implement XY Color Mode ✅ **PRIORITY: CRITICAL** (Mandatory Feature)
-**Status:** ⬜ Not Started
+**Status:** ✅ Completed (2025-10-03)
 
 **Description:** Add CIE 1931 XY color space support (mandatory for Extended Color Light).
 
@@ -328,6 +325,36 @@ drev: 2  // Matter 1.2 uses revision 2+
 - [CIE 1931 Color Space](https://en.wikipedia.org/wiki/CIE_1931_color_space)
 - [sRGB Color Space](https://en.wikipedia.org/wiki/SRGB)
 - Color conversion algorithms available in various Rust crates (e.g., `palette`)
+
+**Completion Notes:**
+- ✅ Added XY state fields: `current_x`, `current_y`, `color_mode` to LightController
+- ✅ Implemented `xy_to_rgb()` conversion at src/lib.rs:183
+  - XY→XYZ→sRGB matrix transformation
+  - Clamping for out-of-gamut colors
+  - ⚠️ Gamma correction skipped (requires `libm` crate for `powf`)
+- ✅ Implemented `rgb_to_xy()` conversion at src/lib.rs:246
+  - RGB→XYZ matrix transformation
+  - XYZ→xy chromaticity coordinates
+  - ⚠️ Gamma expansion skipped (linear RGB used)
+- ✅ Added `current_x()` and `current_y()` attributes at src/lib.rs:320-332
+- ✅ Updated `color_mode()` and `enhanced_color_mode()` to return dynamic mode
+- ✅ Implemented `handle_move_to_color()` at src/lib.rs:430
+  - Sets XY coordinates, switches to mode 1, updates LED
+- ✅ Updated `handle_move_to_hue_and_saturation()` at src/lib.rs:397
+  - Switches to mode 0, syncs XY values via RGB conversion
+- ✅ Modified `update_led()` at src/lib.rs:98 to support both HS (mode 0) and XY (mode 1)
+- ✅ Build successful
+
+**Known Limitations:**
+- ⚠️ No gamma correction (colors may look slightly washed out)
+  - **Future:** Add `libm` crate dependency for proper gamma
+- ⚠️ Transitions are instant (no smooth color changes yet)
+- ⚠️ `MoveColor` and `StepColor` commands are stubbed
+
+**Testing Notes:**
+- Device now supports both HS and XY color modes
+- Color mode switches automatically based on which commands are used
+- XY coordinates are synchronized when HS mode is used
 
 ---
 

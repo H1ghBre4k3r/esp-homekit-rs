@@ -22,6 +22,7 @@ pub mod credentials;
 pub mod identify;
 pub mod level_control;
 pub mod nvs;
+pub mod util;
 
 #[macro_export]
 macro_rules! mk_static {

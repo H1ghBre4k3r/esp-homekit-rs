@@ -14,24 +14,23 @@
 #![no_main]
 #![recursion_limit = "256"]
 
-use core::panic::PanicInfo;
-
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 
 use esp_alloc::heap_allocator;
-use esp_backtrace::{self, Backtrace};
+use esp_backtrace as _;
 use esp_hal::rmt::{ConstChannelAccess, Rmt, Tx};
 use esp_hal::time::Rate;
-use esp_hal::timer::timg::TimerGroup;
+use esp_hal::timer::timg::{TimerGroup, Wdt};
 
 use esp_hal_smartled::{smart_led_buffer, SmartLedsAdapter};
 use esp_homekit::credentials::credentials;
 use esp_homekit::nvs::get_persistent_store;
+use esp_homekit::util::blink;
 use esp_homekit::{
     color_control, identify, level_control, mk_static, LightController, LED_COUNT, LED_SIZE,
 };
-use log::{error, info};
+use log::info;
 
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::devices::test::{TEST_PID, TEST_VID};
@@ -68,21 +67,18 @@ const DEVICE_CONFIG: BasicInfoConfig = BasicInfoConfig {
     device_name: "ESP32 Smart Light",
     ..BasicInfoConfig::new()
 };
-//
-// #[embassy_executor::task]
-// async fn blinky(onboard: SmartLedsAdapter<ConstChannelAccess<Tx, 1>, 25>) {
-//
-// }
 
-async fn blink(led: &mut SmartLedsAdapter<ConstChannelAccess<Tx, 1>, 25>, r: u8, g: u8, b: u8) {
-    led.write([RGB8 { r, g, b }]).unwrap();
-    Timer::after(Duration::from_millis(1000)).await;
-    led.write([RGB8 { r: 0, g: 0, b: 0 }]).unwrap();
-    Timer::after(Duration::from_millis(1000)).await;
+#[embassy_executor::task]
+async fn watchdog_feeder(wdt: &'static mut Wdt<esp_hal::peripherals::TIMG1<'static>>) {
+    loop {
+        Timer::after(Duration::from_secs(3)).await;
+        info!("Feeding watchdog...");
+        wdt.feed();
+    }
 }
 
 #[esp_hal_embassy::main]
-async fn main(_s: Spawner) {
+async fn main(s: Spawner) {
     esp_println::logger::init_logger(log::LevelFilter::Info);
 
     info!("Starting...");
@@ -128,6 +124,18 @@ async fn main(_s: Spawner) {
 
     esp_hal_embassy::init(esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER).alarm0);
 
+    // setup watchdog
+    let timg1 = TimerGroup::new(peripherals.TIMG1);
+    let mut wdt = timg1.wdt;
+    wdt.set_timeout(
+        esp_hal::timer::timg::MwdtStage::Stage0,
+        esp_hal::time::Duration::from_secs(5),
+    );
+    wdt.enable();
+
+    let wdt_static = mk_static!(Wdt<esp_hal::peripherals::TIMG1>, wdt);
+    s.spawn(watchdog_feeder(wdt_static)).unwrap();
+
     Timer::after(Duration::from_millis(1000)).await;
 
     blink(&mut onboard, LEVEL, 0, 0).await;
@@ -165,7 +173,7 @@ async fn main(_s: Spawner) {
     blink(&mut onboard, 0, LEVEL, 0).await;
 
     // Spawn transition task for smooth color/brightness changes
-    _s.spawn(esp_homekit::transition_task(light_controller))
+    s.spawn(esp_homekit::transition_task(light_controller))
         .unwrap();
 
     // == Step 3: ==
@@ -239,25 +247,6 @@ async fn main(_s: Spawner) {
         )
         .await
         .unwrap()
-}
-
-#[panic_handler]
-fn handler(info: &PanicInfo) -> ! {
-    error!("");
-    error!("====================== PANIC ======================");
-
-    error!("{}", info);
-
-    error!("");
-    error!("Backtrace:");
-    error!("");
-
-    let backtrace = Backtrace::capture();
-    for frame in backtrace.frames() {
-        error!("0x{:x}", frame.program_counter());
-    }
-
-    esp_hal::system::software_reset()
 }
 
 /// Endpoint 0 (the root endpoint) always runs

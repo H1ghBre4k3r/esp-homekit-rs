@@ -1,5 +1,6 @@
 #![no_std]
 
+use embassy_time::{Duration, Timer};
 use esp_hal::rmt::{ConstChannelAccess, Tx};
 use esp_hal_smartled::SmartLedsAdapter;
 use log::info;
@@ -37,6 +38,53 @@ pub const LED_SIZE: usize = 1 + LED_COUNT * 32;
 
 type Led = SmartLedsAdapter<ConstChannelAccess<Tx, 0>, LED_SIZE, RGBA<u8>>;
 
+/// Tracks an active transition/animation
+#[derive(Clone, Copy)]
+struct TransitionState {
+    active: bool,
+    transition_type: u8, // 0=level, 1=HS, 2=XY, 3=CT
+    // Start values
+    start_level: u8,
+    start_hue: u8,
+    start_sat: u8,
+    start_x: u16,
+    start_y: u16,
+    start_ct: u16,
+    // Target values
+    target_level: u8,
+    target_hue: u8,
+    target_sat: u8,
+    target_x: u16,
+    target_y: u16,
+    target_ct: u16,
+    // Timing (in deciseconds, 1ds = 100ms)
+    elapsed_ds: u16,
+    total_ds: u16,
+}
+
+impl TransitionState {
+    const fn inactive() -> Self {
+        TransitionState {
+            active: false,
+            transition_type: 0,
+            start_level: 0,
+            start_hue: 0,
+            start_sat: 0,
+            start_x: 0,
+            start_y: 0,
+            start_ct: 0,
+            target_level: 0,
+            target_hue: 0,
+            target_sat: 0,
+            target_x: 0,
+            target_y: 0,
+            target_ct: 0,
+            elapsed_ds: 0,
+            total_ds: 0,
+        }
+    }
+}
+
 pub struct LightController {
     dataver: Dataver,
     led: RefCell<Led>,
@@ -51,6 +99,8 @@ pub struct LightController {
     color_mode: RefCell<u8>, // 0=HS, 1=XY, 2=CT
     // ColorControl Color Temperature mode state
     color_temperature_mireds: RefCell<u16>, // 153-500 mireds (6500K-2000K)
+    // Transition state for smooth animations
+    transition: RefCell<TransitionState>,
 }
 
 impl LightController {
@@ -95,6 +145,7 @@ impl LightController {
             current_y: RefCell::new(0),                    // Start at y=0.0
             color_mode: RefCell::new(0),                   // Start in HS mode
             color_temperature_mireds: RefCell::new(250),   // Start at 4000K (neutral white)
+            transition: RefCell::new(TransitionState::inactive()),
         }
     }
 
@@ -155,6 +206,107 @@ impl LightController {
             )
             .unwrap();
         }
+    }
+
+    /// Update transition state - called periodically (every 100ms = 1 decisecond)
+    /// Returns true if a transition is active
+    pub fn update_transition(&self) -> bool {
+        let mut transition = self.transition.borrow_mut();
+
+        if !transition.active {
+            return false;
+        }
+
+        // Increment elapsed time
+        transition.elapsed_ds += 1;
+
+        // Check if transition is complete
+        if transition.elapsed_ds >= transition.total_ds {
+            // Transition complete - set final values
+            match transition.transition_type {
+                0 => {
+                    // Level transition
+                    *self.current_level.borrow_mut() = transition.target_level;
+                }
+                1 => {
+                    // HS transition
+                    *self.hue.borrow_mut() = transition.target_hue;
+                    *self.saturation.borrow_mut() = transition.target_sat;
+                    *self.current_level.borrow_mut() = transition.target_level;
+                }
+                2 => {
+                    // XY transition
+                    *self.current_x.borrow_mut() = transition.target_x;
+                    *self.current_y.borrow_mut() = transition.target_y;
+                    *self.current_level.borrow_mut() = transition.target_level;
+                }
+                3 => {
+                    // CT transition
+                    *self.color_temperature_mireds.borrow_mut() = transition.target_ct;
+                    *self.current_level.borrow_mut() = transition.target_level;
+                }
+                _ => {}
+            }
+            transition.active = false;
+            drop(transition);
+            self.update_led();
+            self.notify_dataver_changed();
+            return false;
+        }
+
+        // Calculate interpolation factor (0.0 to 1.0)
+        let progress = transition.elapsed_ds as f32 / transition.total_ds as f32;
+
+        // Linear interpolation helper
+        let lerp_u8 = |start: u8, target: u8, t: f32| -> u8 {
+            let start_f = start as f32;
+            let target_f = target as f32;
+            (start_f + (target_f - start_f) * t) as u8
+        };
+        let lerp_u16 = |start: u16, target: u16, t: f32| -> u16 {
+            let start_f = start as f32;
+            let target_f = target as f32;
+            (start_f + (target_f - start_f) * t) as u16
+        };
+
+        // Interpolate based on transition type
+        match transition.transition_type {
+            0 => {
+                // Level transition
+                let new_level = lerp_u8(transition.start_level, transition.target_level, progress);
+                *self.current_level.borrow_mut() = new_level;
+            }
+            1 => {
+                // HS transition
+                let new_hue = lerp_u8(transition.start_hue, transition.target_hue, progress);
+                let new_sat = lerp_u8(transition.start_sat, transition.target_sat, progress);
+                let new_level = lerp_u8(transition.start_level, transition.target_level, progress);
+                *self.hue.borrow_mut() = new_hue;
+                *self.saturation.borrow_mut() = new_sat;
+                *self.current_level.borrow_mut() = new_level;
+            }
+            2 => {
+                // XY transition
+                let new_x = lerp_u16(transition.start_x, transition.target_x, progress);
+                let new_y = lerp_u16(transition.start_y, transition.target_y, progress);
+                let new_level = lerp_u8(transition.start_level, transition.target_level, progress);
+                *self.current_x.borrow_mut() = new_x;
+                *self.current_y.borrow_mut() = new_y;
+                *self.current_level.borrow_mut() = new_level;
+            }
+            3 => {
+                // CT transition
+                let new_ct = lerp_u16(transition.start_ct, transition.target_ct, progress);
+                let new_level = lerp_u8(transition.start_level, transition.target_level, progress);
+                *self.color_temperature_mireds.borrow_mut() = new_ct;
+                *self.current_level.borrow_mut() = new_level;
+            }
+            _ => {}
+        }
+
+        drop(transition);
+        self.update_led();
+        true
     }
 
     pub fn get_on_off(&self) -> bool {
@@ -472,31 +624,52 @@ impl color_control::ClusterHandler for LightController {
         _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveToHueAndSaturationRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move to hue sat {request:?}");
-        let Ok(hue) = request.hue() else {
-            panic!("missing hue")
-        };
-
-        let Ok(saturation) = request.saturation() else {
-            panic!("missing saturation")
-        };
-
-        *self.hue.borrow_mut() = hue;
-        *self.saturation.borrow_mut() = saturation;
+        let hue = request.hue()?;
+        let saturation = request.saturation()?;
+        let transition_time = request.transition_time()?;
+        info!("move to hue {} sat {} over {} ds", hue, saturation, transition_time);
 
         // Switch to HS color mode
         *self.color_mode.borrow_mut() = ColorMode::CurrentHueAndCurrentSaturation as u8;
 
-        // Sync XY values by converting current HSV to RGB then to XY
-        let level = *self.current_level.borrow();
-        let value = ((level as u16 * 100) / 254) as u8;
-        let RGB8 { r, g, b } = hsv_to_rgb(hue, saturation, value);
-        let (x, y) = rgb_to_xy(r, g, b);
-        *self.current_x.borrow_mut() = x;
-        *self.current_y.borrow_mut() = y;
+        if transition_time == 0 {
+            // Instant change
+            *self.hue.borrow_mut() = hue;
+            *self.saturation.borrow_mut() = saturation;
 
-        self.update_led();
-        self.notify_dataver_changed();
+            // Sync XY values
+            let level = *self.current_level.borrow();
+            let value = ((level as u16 * 100) / 254) as u8;
+            let RGB8 { r, g, b } = hsv_to_rgb(hue, saturation, value);
+            let (x, y) = rgb_to_xy(r, g, b);
+            *self.current_x.borrow_mut() = x;
+            *self.current_y.borrow_mut() = y;
+
+            self.update_led();
+            self.notify_dataver_changed();
+        } else {
+            // Start transition
+            let mut transition = self.transition.borrow_mut();
+            *transition = TransitionState {
+                active: true,
+                transition_type: 1, // HS transition
+                start_level: *self.current_level.borrow(),
+                start_hue: *self.hue.borrow(),
+                start_sat: *self.saturation.borrow(),
+                target_level: *self.current_level.borrow(), // Keep level same
+                target_hue: hue,
+                target_sat: saturation,
+                start_x: 0,
+                start_y: 0,
+                start_ct: 0,
+                target_x: 0,
+                target_y: 0,
+                target_ct: 0,
+                elapsed_ds: 0,
+                total_ds: transition_time,
+            };
+        }
+
         Ok(())
     }
 
@@ -507,18 +680,40 @@ impl color_control::ClusterHandler for LightController {
     ) -> Result<(), rs_matter::error::Error> {
         let x = request.color_x()?;
         let y = request.color_y()?;
-        info!("move to color x={}, y={}", x, y);
-
-        // Update XY coordinates
-        *self.current_x.borrow_mut() = x;
-        *self.current_y.borrow_mut() = y;
+        let transition_time = request.transition_time()?;
+        info!("move to color x={}, y={} over {} ds", x, y, transition_time);
 
         // Switch to XY color mode
         *self.color_mode.borrow_mut() = ColorMode::CurrentXAndCurrentY as u8;
 
-        // Update LED
-        self.update_led();
-        self.notify_dataver_changed();
+        if transition_time == 0 {
+            // Instant change
+            *self.current_x.borrow_mut() = x;
+            *self.current_y.borrow_mut() = y;
+            self.update_led();
+            self.notify_dataver_changed();
+        } else {
+            // Start transition
+            let mut transition = self.transition.borrow_mut();
+            *transition = TransitionState {
+                active: true,
+                transition_type: 2, // XY transition
+                start_level: *self.current_level.borrow(),
+                start_x: *self.current_x.borrow(),
+                start_y: *self.current_y.borrow(),
+                target_level: *self.current_level.borrow(), // Keep level same
+                target_x: x,
+                target_y: y,
+                start_hue: 0,
+                start_sat: 0,
+                start_ct: 0,
+                target_hue: 0,
+                target_sat: 0,
+                target_ct: 0,
+                elapsed_ds: 0,
+                total_ds: transition_time,
+            };
+        }
 
         Ok(())
     }
@@ -547,20 +742,42 @@ impl color_control::ClusterHandler for LightController {
         request: color_control::MoveToColorTemperatureRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
         let mireds = request.color_temperature_mireds()?;
-        info!("move to color temperature: {} mireds", mireds);
+        let transition_time = request.transition_time()?;
 
         // Clamp to physical range (153-500 mireds = 6500K-2000K)
         let mireds = mireds.clamp(153, 500);
-
-        // Update color temperature
-        *self.color_temperature_mireds.borrow_mut() = mireds;
+        info!("move to color temperature: {} mireds over {} ds", mireds, transition_time);
 
         // Switch to Color Temperature mode
         *self.color_mode.borrow_mut() = ColorMode::ColorTemperature as u8;
 
-        // Update LED
-        self.update_led();
-        self.notify_dataver_changed();
+        if transition_time == 0 {
+            // Instant change
+            *self.color_temperature_mireds.borrow_mut() = mireds;
+            self.update_led();
+            self.notify_dataver_changed();
+        } else {
+            // Start transition
+            let mut transition = self.transition.borrow_mut();
+            *transition = TransitionState {
+                active: true,
+                transition_type: 3, // CT transition
+                start_level: *self.current_level.borrow(),
+                start_ct: *self.color_temperature_mireds.borrow(),
+                target_level: *self.current_level.borrow(), // Keep level same
+                target_ct: mireds,
+                start_hue: 0,
+                start_sat: 0,
+                start_x: 0,
+                start_y: 0,
+                target_hue: 0,
+                target_sat: 0,
+                target_x: 0,
+                target_y: 0,
+                elapsed_ds: 0,
+                total_ds: transition_time,
+            };
+        }
 
         Ok(())
     }
@@ -743,8 +960,9 @@ impl crate::level_control::ClusterHandler for LightController {
         let level = request.level()?;
         info!("move to level: {}", level);
 
-        // For now, implement instant change (no transition)
-        // TODO: Implement smooth transition based on request.transition_time
+        // TODO: transition_time support for LevelControl
+        // The transition_time field returns Maybe<u16, AsNullable> which doesn't have easy unwrap
+        // For now, always do instant change. Color commands support transitions.
         *self.current_level.borrow_mut() = level;
         self.update_led();
         self.notify_dataver_changed();
@@ -861,5 +1079,15 @@ impl crate::level_control::ClusterHandler for LightController {
     ) -> Result<(), rs_matter::error::Error> {
         info!("move to closest frequency - not implemented");
         Ok(())
+    }
+}
+
+/// Background task that updates transitions every 100ms (1 decisecond)
+/// Must be spawned from main.rs with a 'static reference to LightController
+#[embassy_executor::task]
+pub async fn transition_task(controller: &'static LightController) {
+    loop {
+        Timer::after(Duration::from_millis(100)).await;
+        controller.update_transition();
     }
 }

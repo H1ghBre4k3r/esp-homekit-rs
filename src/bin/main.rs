@@ -121,10 +121,17 @@ async fn main(_s: Spawner) {
         )
     );
 
-    let light_controller = LightController::new(Dataver::new_rand(stack.matter().rand()), led);
-    let light_control_handler = color_control::HandlerAdaptor(&light_controller);
-    let level_control_handler = level_control::HandlerAdaptor(&light_controller);
-    let on_off_handler = on_off::HandlerAdaptor(&light_controller);
+    let light_controller = mk_static!(
+        LightController,
+        LightController::new(Dataver::new_rand(stack.matter().rand()), led)
+    );
+    let light_control_handler = color_control::HandlerAdaptor(&*light_controller);
+    let level_control_handler = level_control::HandlerAdaptor(&*light_controller);
+    let on_off_handler = on_off::HandlerAdaptor(&*light_controller);
+
+    // Spawn transition task for smooth color/brightness changes
+    _s.spawn(esp_homekit::transition_task(light_controller))
+        .unwrap();
 
     // == Step 3: ==
     // Our "light" on-off and color control clusters, both handled by LightController
@@ -170,7 +177,7 @@ async fn main(_s: Spawner) {
     // This step can be repeated in that the stack can be stopped and started multiple times, as needed.
     // let store = stack.create_shared_store(Nvs::new());
     let store = stack.create_shared_store(get_persistent_store());
-    let mut matter = pin!(stack.run_coex(
+    let matter = pin!(stack.run_coex(
         // The Matter stack needs to instantiate an `embassy-net` `Driver` and `Controller`
         EmbassyWifi::new(
             EspWifiDriver::new(&init, peripherals.WIFI, peripherals.BT),
@@ -184,30 +191,8 @@ async fn main(_s: Spawner) {
         (),
     ));
 
-    // Just for demoing purposes:
-    //
-    // Run a sample loop that simulates state changes triggered by the HAL
-    // Changes will be properly communicated to the Matter controllers
-    // (i.e. Google Home, Alexa) and other Matter devices thanks to subscriptions
-    let mut device = pin!(async {
-        loop {
-            // Simulate user toggling the light with a physical switch every 5 seconds
-            Timer::after(Duration::from_secs(5)).await;
-
-            // Toggle
-            let current = light_controller.get_on_off();
-            light_controller.set_on_off(!current);
-
-            // Let the Matter stack know that we have changed
-            // the state of our Light device
-            stack.notify_changed();
-
-            info!("Light toggled");
-        }
-    });
-
     // Schedule the Matter run & the device loop together
-    select(&mut matter, &mut device).coalesce().await.unwrap();
+    matter.await.unwrap();
 }
 
 /// Endpoint 0 (the root endpoint) always runs

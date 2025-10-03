@@ -49,6 +49,8 @@ pub struct LightController {
     current_x: RefCell<u16>, // 0-65535 (0.0-1.0)
     current_y: RefCell<u16>, // 0-65535 (0.0-1.0)
     color_mode: RefCell<u8>, // 0=HS, 1=XY, 2=CT
+    // ColorControl Color Temperature mode state
+    color_temperature_mireds: RefCell<u16>, // 153-500 mireds (6500K-2000K)
 }
 
 impl LightController {
@@ -88,10 +90,11 @@ impl LightController {
             on_off: RefCell::new(false),
             hue: RefCell::new(0),
             saturation: RefCell::new(0),
-            current_level: RefCell::new(254), // Start at maximum brightness
-            current_x: RefCell::new(0),       // Start at x=0.0
-            current_y: RefCell::new(0),       // Start at y=0.0
-            color_mode: RefCell::new(0),      // Start in HS mode
+            current_level: RefCell::new(254),              // Start at maximum brightness
+            current_x: RefCell::new(0),                    // Start at x=0.0
+            current_y: RefCell::new(0),                    // Start at y=0.0
+            color_mode: RefCell::new(0),                   // Start in HS mode
+            color_temperature_mireds: RefCell::new(250),   // Start at 4000K (neutral white)
         }
     }
 
@@ -118,9 +121,15 @@ impl LightController {
                     let y = *self.current_y.borrow();
                     xy_to_rgb(x, y, level)
                 }
-                // Mode 2: Color Temperature (not implemented yet)
+                // Mode 2: Color Temperature
+                2 => {
+                    let mireds = *self.color_temperature_mireds.borrow();
+                    // Convert mireds to Kelvin: K = 1,000,000 / mireds
+                    let kelvin = (1_000_000 / mireds as u32) as u16;
+                    kelvin_to_rgb(kelvin, level)
+                }
+                // Unknown mode - default to black
                 _ => {
-                    // Default to black if unknown mode
                     RGB8 { r: 0, g: 0, b: 0 }
                 }
             };
@@ -278,6 +287,45 @@ fn rgb_to_xy(r: u8, g: u8, b: u8) -> (u16, u16) {
     (x_u16, y_u16)
 }
 
+/// Convert color temperature (in Kelvin) to RGB
+/// Simplified linear interpolation approach (no powf/ln needed for no_std)
+fn kelvin_to_rgb(kelvin: u16, brightness: u8) -> RGB8 {
+    // Clamp kelvin to typical range (2000K-6500K for white LEDs)
+    let kelvin = kelvin.clamp(2000, 6500);
+
+    let r: f32;
+    let g: f32;
+    let b: f32;
+
+    // Simplified color temperature approximation using linear interpolation
+    // 2000K = warm (255, 147, 44)
+    // 4000K = neutral (255, 228, 206)
+    // 6500K = cool (255, 254, 250)
+
+    if kelvin <= 4000 {
+        // Interpolate between warm (2000K) and neutral (4000K)
+        let t = (kelvin - 2000) as f32 / 2000.0; // 0.0 to 1.0
+        r = 255.0;
+        g = 147.0 + (228.0 - 147.0) * t;
+        b = 44.0 + (206.0 - 44.0) * t;
+    } else {
+        // Interpolate between neutral (4000K) and cool (6500K)
+        let t = (kelvin - 4000) as f32 / 2500.0; // 0.0 to 1.0
+        r = 255.0;
+        g = 228.0 + (254.0 - 228.0) * t;
+        b = 206.0 + (250.0 - 206.0) * t;
+    }
+
+    // Scale by brightness
+    let brightness_factor = brightness as f32 / 254.0;
+
+    RGB8 {
+        r: (r * brightness_factor) as u8,
+        g: (g * brightness_factor) as u8,
+        b: (b * brightness_factor) as u8,
+    }
+}
+
 impl color_control::ClusterHandler for LightController {
     const CLUSTER: rs_matter::dm::Cluster<'static> = Self::COLOR_CONTROL_CLUSTER;
 
@@ -333,6 +381,27 @@ impl color_control::ClusterHandler for LightController {
         _ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u16, rs_matter::error::Error> {
         Ok(*self.current_y.borrow())
+    }
+
+    fn color_temperature_mireds(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(*self.color_temperature_mireds.borrow())
+    }
+
+    fn color_temp_physical_min_mireds(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(153) // 6500K (cool white)
+    }
+
+    fn color_temp_physical_max_mireds(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        Ok(500) // 2000K (warm white)
     }
 
     fn set_options(
@@ -474,11 +543,26 @@ impl color_control::ClusterHandler for LightController {
 
     fn handle_move_to_color_temperature(
         &self,
-        ctx: impl rs_matter::dm::InvokeContext,
+        _ctx: impl rs_matter::dm::InvokeContext,
         request: color_control::MoveToColorTemperatureRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        info!("move to temp {request:?}");
-        todo!()
+        let mireds = request.color_temperature_mireds()?;
+        info!("move to color temperature: {} mireds", mireds);
+
+        // Clamp to physical range (153-500 mireds = 6500K-2000K)
+        let mireds = mireds.clamp(153, 500);
+
+        // Update color temperature
+        *self.color_temperature_mireds.borrow_mut() = mireds;
+
+        // Switch to Color Temperature mode
+        *self.color_mode.borrow_mut() = ColorMode::ColorTemperature as u8;
+
+        // Update LED
+        self.update_led();
+        self.notify_dataver_changed();
+
+        Ok(())
     }
 
     fn handle_enhanced_move_to_hue(

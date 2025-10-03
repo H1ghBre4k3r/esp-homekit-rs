@@ -29,7 +29,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal_smartled::{smart_led_buffer, SmartLedsAdapter};
 use esp_homekit::credentials::credentials;
 use esp_homekit::nvs::get_persistent_store;
-use esp_homekit::{color_control, mk_static, LightController, LED_COUNT, LED_SIZE};
+use esp_homekit::{color_control, level_control, mk_static, LightController, LED_COUNT, LED_SIZE};
 use log::info;
 
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
@@ -123,6 +123,7 @@ async fn main(_s: Spawner) {
 
     let light_controller = LightController::new(Dataver::new_rand(stack.matter().rand()), led);
     let light_control_handler = color_control::HandlerAdaptor(&light_controller);
+    let level_control_handler = level_control::HandlerAdaptor(&light_controller);
     let on_off_handler = on_off::HandlerAdaptor(&light_controller);
 
     // == Step 3: ==
@@ -137,6 +138,14 @@ async fn main(_s: Spawner) {
                 Some(LightController::ON_OFF_CLUSTER.id),
             ),
             Async(on_off_handler),
+        )
+        // Level control cluster (brightness)
+        .chain(
+            EpClMatcher::new(
+                Some(LIGHT_ENDPOINT_ID),
+                Some(LightController::LEVEL_CONTROL_CLUSTER.id),
+            ),
+            Async(level_control_handler),
         )
         // Color control cluster
         .chain(
@@ -213,12 +222,13 @@ const NODE: Node = Node {
         Endpoint {
             id: LIGHT_ENDPOINT_ID,
             device_types: devices!(DeviceType {
-                dtype: 0x010C,
-                drev: 4
+                dtype: 0x010D,
+                drev: 2
             }),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
                 LightController::ON_OFF_CLUSTER,
+                LightController::LEVEL_CONTROL_CLUSTER,
                 LightController::COLOR_CONTROL_CLUSTER
             ),
         },

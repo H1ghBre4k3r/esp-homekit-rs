@@ -8,6 +8,7 @@ use rs_matter::{
         clusters::on_off::{self, ClusterHandler as _},
         Dataver,
     },
+    tlv::AsNullable,
     utils::{cell::RefCell, maybe::Maybe},
     with,
 };
@@ -17,6 +18,7 @@ use smart_leds::{SmartLedsWrite as _, RGB8, RGBA};
 
 pub mod color_control;
 pub mod credentials;
+pub mod level_control;
 pub mod nvs;
 
 #[macro_export]
@@ -41,6 +43,8 @@ pub struct LightController {
     on_off: RefCell<bool>,
     hue: RefCell<u8>,
     saturation: RefCell<u8>,
+    // LevelControl cluster state
+    current_level: RefCell<u8>, // 0-254 (1=minimum light, 254=maximum)
 }
 
 impl LightController {
@@ -70,6 +74,9 @@ impl LightController {
         ))
         .with_features(Feature::all().bits());
 
+    pub const LEVEL_CONTROL_CLUSTER: rs_matter::dm::Cluster<'static> =
+        crate::level_control::FULL_CLUSTER.with_attrs(with!(required));
+
     pub fn new(dataver: Dataver, led: Led) -> Self {
         LightController {
             dataver,
@@ -77,6 +84,7 @@ impl LightController {
             on_off: RefCell::new(false),
             hue: RefCell::new(0),
             saturation: RefCell::new(0),
+            current_level: RefCell::new(254), // Start at maximum brightness
         }
     }
 
@@ -87,7 +95,13 @@ impl LightController {
         if on {
             let hue = *self.hue.borrow();
             let sat = *self.saturation.borrow();
-            let RGB8 { r, g, b } = hsv_to_rgb(hue, sat, 100);
+            let level = *self.current_level.borrow();
+
+            // Convert level (0-254) to value (0-100) for HSV
+            // Use saturating math to avoid overflow
+            let value = ((level as u16 * 100) / 254) as u8;
+
+            let RGB8 { r, g, b } = hsv_to_rgb(hue, sat, value);
             // Note: LED has swapped R and G channels
             led.write(
                 [RGBA {
@@ -470,5 +484,152 @@ impl on_off::ClusterHandler for LightController {
         info!("on with timed off");
         // For simplicity, treat same as regular on
         self.handle_on(_ctx)
+    }
+}
+
+impl crate::level_control::ClusterHandler for LightController {
+    const CLUSTER: rs_matter::dm::Cluster<'static> = Self::LEVEL_CONTROL_CLUSTER;
+
+    fn dataver(&self) -> u32 {
+        self.dataver.get()
+    }
+
+    fn dataver_changed(&self) {
+        self.notify_dataver_changed();
+    }
+
+    fn current_level(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<Maybe<u8, AsNullable>, rs_matter::error::Error> {
+        Ok(Maybe::some(*self.current_level.borrow()))
+    }
+
+    fn handle_move_to_level(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        request: crate::level_control::MoveToLevelRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        let level = request.level()?;
+        info!("move to level: {}", level);
+
+        // For now, implement instant change (no transition)
+        // TODO: Implement smooth transition based on request.transition_time
+        *self.current_level.borrow_mut() = level;
+        self.update_led();
+        self.notify_dataver_changed();
+
+        Ok(())
+    }
+
+    fn handle_move_to_level_with_on_off(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        request: crate::level_control::MoveToLevelWithOnOffRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        let level = request.level()?;
+        info!("move to level with on/off: {}", level);
+
+        // Turn on if level > 0, off if level == 0
+        *self.on_off.borrow_mut() = level > 0;
+        *self.current_level.borrow_mut() = level;
+        self.update_led();
+        self.notify_dataver_changed();
+
+        Ok(())
+    }
+
+    // Stub out remaining required methods
+    fn options(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<crate::level_control::OptionsBitmap, rs_matter::error::Error> {
+        Ok(crate::level_control::OptionsBitmap::empty())
+    }
+
+    fn on_level(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<Maybe<u8, AsNullable>, rs_matter::error::Error> {
+        Ok(Maybe::none())
+    }
+
+    fn set_options(
+        &self,
+        _ctx: impl rs_matter::dm::WriteContext,
+        _value: crate::level_control::OptionsBitmap,
+    ) -> Result<(), rs_matter::error::Error> {
+        Ok(())
+    }
+
+    fn set_on_level(
+        &self,
+        _ctx: impl rs_matter::dm::WriteContext,
+        _value: Maybe<u8, AsNullable>,
+    ) -> Result<(), rs_matter::error::Error> {
+        Ok(())
+    }
+
+    fn handle_move(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: crate::level_control::MoveRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("move (continuous) - not implemented");
+        Ok(())
+    }
+
+    fn handle_step(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: crate::level_control::StepRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("step - not implemented");
+        Ok(())
+    }
+
+    fn handle_stop(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: crate::level_control::StopRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("stop - not implemented");
+        Ok(())
+    }
+
+    fn handle_move_with_on_off(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: crate::level_control::MoveWithOnOffRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("move with on/off - not implemented");
+        Ok(())
+    }
+
+    fn handle_step_with_on_off(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: crate::level_control::StepWithOnOffRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("step with on/off - not implemented");
+        Ok(())
+    }
+
+    fn handle_stop_with_on_off(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: crate::level_control::StopWithOnOffRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("stop with on/off - not implemented");
+        Ok(())
+    }
+
+    fn handle_move_to_closest_frequency(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        _request: crate::level_control::MoveToClosestFrequencyRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        info!("move to closest frequency - not implemented");
+        Ok(())
     }
 }

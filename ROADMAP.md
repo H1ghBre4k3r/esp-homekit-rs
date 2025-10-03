@@ -12,8 +12,8 @@ This roadmap outlines the implementation plan to achieve Matter 1.2 specificatio
 
 ## Progress Overview
 
-- [ ] **Phase 0:** Foundation & Corrections (1 task)
-- [ ] **Phase 1:** Required Clusters - Basic (4 tasks)
+- [x] **Phase 0:** Foundation & Corrections (1 task) ✅ **COMPLETED**
+- [ ] **Phase 1:** Required Clusters - Basic (4 tasks) - 1/4 completed
 - [ ] **Phase 2:** LevelControl Cluster (1 task)
 - [ ] **Phase 3:** ColorControl - XY Mode (1 task)
 - [ ] **Phase 4:** ColorControl - Color Temperature (1 task)
@@ -28,7 +28,7 @@ This roadmap outlines the implementation plan to achieve Matter 1.2 specificatio
 ## Phase 0: Foundation & Corrections
 
 ### Task 0.1: Fix Device Type ID ✅ **PRIORITY: CRITICAL**
-**Status:** ⬜ Not Started
+**Status:** ✅ Completed (2025-10-03)
 
 **Description:** Correct the device type from 0x010C (Color Temperature Light) to 0x010D (Extended Color Light).
 
@@ -54,6 +54,12 @@ drev: 2  // Matter 1.2 uses revision 2+
 **Dependencies:** None
 
 **Estimated Effort:** 15 minutes
+
+**Completion Notes:**
+- Changed dtype from 0x010C to 0x010D at src/bin/main.rs:216
+- Changed drev from 4 to 2 at src/bin/main.rs:217
+- Device now correctly advertises as Extended Color Light (0x010D)
+- Requires recommissioning for controllers to recognize new device type
 
 ---
 
@@ -185,7 +191,7 @@ drev: 2  // Matter 1.2 uses revision 2+
 ---
 
 ### Task 1.4: Implement LevelControl Cluster ✅ **PRIORITY: HIGH**
-**Status:** ⬜ Not Started
+**Status:** ✅ Completed (2025-10-03) - Basic implementation without transitions
 
 **Description:** Add brightness/dimming control with smooth transitions.
 
@@ -226,6 +232,31 @@ drev: 2  // Matter 1.2 uses revision 2+
 **Dependencies:** None (but enhances OnOff)
 
 **Estimated Effort:** 8-10 hours (transitions add complexity)
+
+**Completion Notes:**
+- ✅ Created `src/level_control.rs` module using `rs_matter::import!(LevelControl)`
+- ✅ Added `current_level: RefCell<u8>` to LightController (initialized to 254 = max brightness)
+- ✅ Modified `update_led()` at src/lib.rs:93 to scale RGB by brightness level
+- ✅ Implemented `level_control::ClusterHandler` trait with all required methods:
+  - `current_level()` attribute - returns current brightness (0-254)
+  - `handle_move_to_level()` - instant brightness change (no transition yet)
+  - `handle_move_to_level_with_on_off()` - brightness + on/off coordination
+  - Stubbed: Move, Step, Stop commands (continuous/stepped brightness changes)
+- ✅ Added LEVEL_CONTROL_CLUSTER constant to LightController
+- ✅ Added cluster to endpoint at src/bin/main.rs:222
+- ✅ Chained handler at src/bin/main.rs:142-149
+- ✅ Build successful
+
+**Known Limitations:**
+- ⚠️ **No transitions yet**: All brightness changes are instant (request.transition_time ignored)
+- ⚠️ Move/Step/Stop commands are stubbed (return Ok but do nothing)
+- ⚠️ RemainingTime attribute not implemented
+- ⚠️ MinLevel/MaxLevel attributes not exposed
+
+**Next Steps (Future Enhancement):**
+- Implement smooth transitions using Embassy tasks (Task 2.3 from roadmap)
+- Add RemainingTime countdown during transitions
+- Implement Move/Step/Stop commands for continuous brightness control
 
 ---
 

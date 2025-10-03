@@ -14,14 +14,13 @@
 #![no_main]
 #![recursion_limit = "256"]
 
-use core::pin::pin;
+use core::panic::PanicInfo;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::select;
 use embassy_time::{Duration, Timer};
 
 use esp_alloc::heap_allocator;
-use esp_backtrace as _;
+use esp_backtrace::{self, Backtrace};
 use esp_hal::rmt::{ConstChannelAccess, Rmt, Tx};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
@@ -30,7 +29,7 @@ use esp_hal_smartled::{smart_led_buffer, SmartLedsAdapter};
 use esp_homekit::credentials::credentials;
 use esp_homekit::nvs::get_persistent_store;
 use esp_homekit::{color_control, level_control, mk_static, LightController, LED_COUNT, LED_SIZE};
-use log::info;
+use log::{error, info};
 
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::devices::test::{TEST_PID, TEST_VID};
@@ -40,7 +39,6 @@ use rs_matter_embassy::matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter_embassy::matter::dm::clusters::on_off::{self};
 use rs_matter_embassy::matter::dm::devices::test::TEST_DEV_ATT;
 use rs_matter_embassy::matter::dm::{Async, Dataver, EmptyHandler, Endpoint, EpClMatcher, Node};
-use rs_matter_embassy::matter::utils::select::Coalesce;
 use rs_matter_embassy::matter::{clusters, devices};
 use rs_matter_embassy::rand::esp::{esp_init_rand, esp_rand};
 use rs_matter_embassy::wireless::esp::EspWifiDriver;
@@ -177,22 +175,41 @@ async fn main(_s: Spawner) {
     // This step can be repeated in that the stack can be stopped and started multiple times, as needed.
     // let store = stack.create_shared_store(Nvs::new());
     let store = stack.create_shared_store(get_persistent_store());
-    let matter = pin!(stack.run_coex(
-        // The Matter stack needs to instantiate an `embassy-net` `Driver` and `Controller`
-        EmbassyWifi::new(
-            EspWifiDriver::new(&init, peripherals.WIFI, peripherals.BT),
-            stack,
-        ),
-        // The Matter stack needs a persister to store its state
-        &store,
-        // Our `AsyncHandler` + `AsyncMetadata` impl
-        (NODE, handler),
-        // No user future to run
-        (),
-    ));
+    stack
+        .run_coex(
+            // The Matter stack needs to instantiate an `embassy-net` `Driver` and `Controller`
+            EmbassyWifi::new(
+                EspWifiDriver::new(&init, peripherals.WIFI, peripherals.BT),
+                stack,
+            ),
+            // The Matter stack needs a persister to store its state
+            &store,
+            // Our `AsyncHandler` + `AsyncMetadata` impl
+            (NODE, handler),
+            // No user future to run
+            (),
+        )
+        .await
+        .unwrap()
+}
 
-    // Schedule the Matter run & the device loop together
-    matter.await.unwrap();
+#[panic_handler]
+fn handler(info: &PanicInfo) -> ! {
+    error!("");
+    error!("====================== PANIC ======================");
+
+    error!("{}", info);
+
+    error!("");
+    error!("Backtrace:");
+    error!("");
+
+    let backtrace = Backtrace::capture();
+    for frame in backtrace.frames() {
+        error!("0x{:x}", frame.program_counter());
+    }
+
+    esp_hal::system::software_reset()
 }
 
 /// Endpoint 0 (the root endpoint) always runs

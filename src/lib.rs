@@ -19,6 +19,7 @@ use smart_leds::{SmartLedsWrite as _, RGB8, RGBA};
 
 pub mod color_control;
 pub mod credentials;
+pub mod identify;
 pub mod level_control;
 pub mod nvs;
 
@@ -99,6 +100,9 @@ pub struct LightController {
     color_mode: RefCell<u8>, // 0=HS, 1=XY, 2=CT
     // ColorControl Color Temperature mode state
     color_temperature_mireds: RefCell<u16>, // 153-500 mireds (6500K-2000K)
+    // Identify cluster state
+    identify_time_ds: RefCell<u16>, // Remaining identify time in deciseconds
+    identify_phase: RefCell<u8>,    // Blink animation phase (0-9 for 1Hz blink)
     // Transition state for smooth animations
     transition: RefCell<TransitionState>,
 }
@@ -133,6 +137,9 @@ impl LightController {
     pub const LEVEL_CONTROL_CLUSTER: rs_matter::dm::Cluster<'static> =
         crate::level_control::FULL_CLUSTER.with_attrs(with!(required));
 
+    pub const IDENTIFY_CLUSTER: rs_matter::dm::Cluster<'static> =
+        crate::identify::FULL_CLUSTER.with_attrs(with!(required));
+
     pub fn new(dataver: Dataver, led: Led) -> Self {
         LightController {
             dataver,
@@ -140,18 +147,51 @@ impl LightController {
             on_off: RefCell::new(false),
             hue: RefCell::new(0),
             saturation: RefCell::new(0),
-            current_level: RefCell::new(254),              // Start at maximum brightness
-            current_x: RefCell::new(0),                    // Start at x=0.0
-            current_y: RefCell::new(0),                    // Start at y=0.0
-            color_mode: RefCell::new(0),                   // Start in HS mode
-            color_temperature_mireds: RefCell::new(250),   // Start at 4000K (neutral white)
+            current_level: RefCell::new(254), // Start at maximum brightness
+            current_x: RefCell::new(0),       // Start at x=0.0
+            current_y: RefCell::new(0),       // Start at y=0.0
+            color_mode: RefCell::new(0),      // Start in HS mode
+            color_temperature_mireds: RefCell::new(250), // Start at 4000K (neutral white)
+            identify_time_ds: RefCell::new(0), // Not identifying
+            identify_phase: RefCell::new(0),  // Blink phase
             transition: RefCell::new(TransitionState::inactive()),
         }
     }
 
     fn update_led(&self) {
-        let on = *self.on_off.borrow();
         let mut led = self.led.borrow_mut();
+
+        // Identify mode takes priority over normal operation
+        if *self.identify_time_ds.borrow() > 0 {
+            let phase = *self.identify_phase.borrow();
+            if phase < 5 {
+                // First half of blink cycle - bright white
+                led.write(
+                    [RGBA {
+                        r: 255,
+                        g: 255,
+                        b: 255,
+                        a: 0,
+                    }; LED_COUNT],
+                )
+                .unwrap();
+            } else {
+                // Second half - off
+                led.write(
+                    [RGBA {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 0,
+                    }; LED_COUNT],
+                )
+                .unwrap();
+            }
+            return;
+        }
+
+        // Normal operation
+        let on = *self.on_off.borrow();
 
         if on {
             let level = *self.current_level.borrow();
@@ -180,9 +220,7 @@ impl LightController {
                     kelvin_to_rgb(kelvin, level)
                 }
                 // Unknown mode - default to black
-                _ => {
-                    RGB8 { r: 0, g: 0, b: 0 }
-                }
+                _ => RGB8 { r: 0, g: 0, b: 0 },
             };
 
             // Note: LED has swapped R and G channels
@@ -307,6 +345,21 @@ impl LightController {
         drop(transition);
         self.update_led();
         true
+    }
+
+    /// Update identify state - called by transition task every decisecond
+    /// Returns true if currently identifying
+    fn update_identify(&self) -> bool {
+        let mut identify_time = self.identify_time_ds.borrow_mut();
+        if *identify_time > 0 {
+            *identify_time -= 1;
+            // Update blink phase (0-9 for 1Hz blink: 0-4 = on, 5-9 = off)
+            let current_phase = *self.identify_phase.borrow();
+            *self.identify_phase.borrow_mut() = (current_phase + 1) % 10;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn get_on_off(&self) -> bool {
@@ -627,7 +680,10 @@ impl color_control::ClusterHandler for LightController {
         let hue = request.hue()?;
         let saturation = request.saturation()?;
         let transition_time = request.transition_time()?;
-        info!("move to hue {} sat {} over {} ds", hue, saturation, transition_time);
+        info!(
+            "move to hue {} sat {} over {} ds",
+            hue, saturation, transition_time
+        );
 
         // Switch to HS color mode
         *self.color_mode.borrow_mut() = ColorMode::CurrentHueAndCurrentSaturation as u8;
@@ -746,7 +802,10 @@ impl color_control::ClusterHandler for LightController {
 
         // Clamp to physical range (153-500 mireds = 6500K-2000K)
         let mireds = mireds.clamp(153, 500);
-        info!("move to color temperature: {} mireds over {} ds", mireds, transition_time);
+        info!(
+            "move to color temperature: {} mireds over {} ds",
+            mireds, transition_time
+        );
 
         // Switch to Color Temperature mode
         *self.color_mode.borrow_mut() = ColorMode::ColorTemperature as u8;
@@ -1082,12 +1141,92 @@ impl crate::level_control::ClusterHandler for LightController {
     }
 }
 
-/// Background task that updates transitions every 100ms (1 decisecond)
+impl crate::identify::ClusterHandler for LightController {
+    const CLUSTER: rs_matter::dm::Cluster<'static> = crate::identify::FULL_CLUSTER;
+
+    fn dataver(&self) -> u32 {
+        self.dataver.get()
+    }
+
+    fn dataver_changed(&self) {
+        self.notify_dataver_changed();
+    }
+
+    fn identify_time(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<u16, rs_matter::error::Error> {
+        // Convert deciseconds to seconds
+        let ds = *self.identify_time_ds.borrow();
+        Ok(ds / 10)
+    }
+
+    fn set_identify_time(
+        &self,
+        _ctx: impl rs_matter::dm::WriteContext,
+        value: u16,
+    ) -> Result<(), rs_matter::error::Error> {
+        // Convert seconds to deciseconds
+        *self.identify_time_ds.borrow_mut() = value * 10;
+        *self.identify_phase.borrow_mut() = 0;
+        Ok(())
+    }
+
+    fn identify_type(
+        &self,
+        _ctx: impl rs_matter::dm::ReadContext,
+    ) -> Result<crate::identify::IdentifyTypeEnum, rs_matter::error::Error> {
+        // LightOutput (0x01) - we're a light device
+        // Try different variants to find the right one
+        Ok(crate::identify::IdentifyTypeEnum::LightOutput)
+    }
+
+    fn handle_identify(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        request: crate::identify::IdentifyRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        let seconds = request.identify_time()?;
+        info!("identify for {} seconds", seconds);
+
+        // Convert seconds to deciseconds
+        *self.identify_time_ds.borrow_mut() = seconds * 10;
+        // Reset blink phase
+        *self.identify_phase.borrow_mut() = 0;
+
+        Ok(())
+    }
+
+    fn handle_trigger_effect(
+        &self,
+        _ctx: impl rs_matter::dm::InvokeContext,
+        request: crate::identify::TriggerEffectRequest<'_>,
+    ) -> Result<(), rs_matter::error::Error> {
+        let effect_id = request.effect_identifier()?;
+        let effect_variant = request.effect_variant()?;
+        info!(
+            "trigger effect id={:?} variant={:?}",
+            effect_id, effect_variant
+        );
+        // TODO: Implement fancy effects (breathe, blink, okay, channel change)
+        // For now, just treat it as a 2-second identify
+        *self.identify_time_ds.borrow_mut() = 20; // 2 seconds
+        *self.identify_phase.borrow_mut() = 0;
+        Ok(())
+    }
+}
+
+/// Background task that updates transitions and identify every 100ms (1 decisecond)
 /// Must be spawned from main.rs with a 'static reference to LightController
 #[embassy_executor::task]
 pub async fn transition_task(controller: &'static LightController) {
     loop {
         Timer::after(Duration::from_millis(100)).await;
         controller.update_transition();
+
+        // Also update identify countdown and blink animation
+        if controller.update_identify() {
+            controller.update_led();
+        }
     }
 }
